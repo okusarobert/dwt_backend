@@ -1,1 +1,42 @@
 spv_env/
+
+# Secret files - never commit these
+**/manifests/*-secret.yaml
+**/manifests/*-secret.yml
+**/manifests/*secret.yaml
+**/manifests/*secret.yml
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.staging
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Log files
+*.log
+logs/
+
+# Cache directories
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
