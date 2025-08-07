@@ -1,0 +1,40 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
+    cert-manager.io/cluster-issuer: "letsencrypt-cluster-issuer"
+  name: tondeka-app
+  namespace: tondeka-app
+spec:
+  tls:
+  - hosts:
+    - tondeka.digital
+    secretName: tondeka-app-tls
+  - hosts:
+    - www.tondeka.digital
+    secretName: tondeka-app-tls
+
+  rules:
+  - host: tondeka.digital
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service: 
+            name: nginx
+            port: 
+              number: 3030
+  - host: www.tondeka.digital
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service: 
+            name: nginx
+            port: 
+              number: 3030

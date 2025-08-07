@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trx
+  labels:
+    app: trx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trx
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: trx
+    spec:
+      containers:
+        - name: trx
+          image: 992382436162.dkr.ecr.us-east-1.amazonaws.com/trx:latest
+          ports:
+            - containerPort: 5009
+          envFrom:
+            - configMapRef:
+                name: trx-configmap
+            - secretRef:
+                name: trx-secret

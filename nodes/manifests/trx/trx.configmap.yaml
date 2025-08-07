@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trx-configmap
+data:
+  TRX_SERVER: 'https://api.shasta.trongrid.io'
+  TRX_PORT: '5009'

@@ -1,0 +1,3 @@
+aiohttp<4.0
+https://github.com/Electron-Cash/Electron-Cash/archive/e8bbf8280ccaef95c10cdb1c1cb182cd4b504937.zip
+protobuf<4

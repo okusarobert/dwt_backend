@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zookeeper
+  namespace: tondeka-app
+spec:
+  serviceName: zookeeper
+  replicas: 3
+  selector:
+    matchLabels:
+      app: zookeeper
+  template:
+    metadata:
+      labels:
+        app: zookeeper
+    spec:
+      securityContext:
+        fsGroup: 1001
+      initContainers:
+        - name: set-myid
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              echo $(( $(hostname | awk -F'-' '{print $NF}') + 1 )) > /data/myid
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: zookeeper
+          image: zookeeper:3.8
+          ports:
+            - containerPort: 2181
+              name: client
+            - containerPort: 2888
+              name: peer
+            - containerPort: 3888
+              name: election
+          env:
+            - name: ZOO_MY_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: ZOO_SERVERS
+              value: "server.1=zookeeper-0.zookeeper:2888:3888;2181 server.2=zookeeper-1.zookeeper:2888:3888;2181 server.3=zookeeper-2.zookeeper:2888:3888;2181"
+            - name: ZOO_4LW_COMMANDS_WHITELIST
+              value: "*"
+          command:
+            - sh
+            - -c
+            - |
+              # Extract myid from hostname
+              MYID=$(( $(hostname | awk -F'-' '{print $NF}') + 1 ))
+              echo $MYID > /data/myid
+              
+              # Create zoo.cfg
+              cat > /conf/zoo.cfg << EOF
+              tickTime=2000
+              initLimit=10
+              syncLimit=5
+              dataDir=/data
+              clientPort=2181
+              server.1=zookeeper-0.zookeeper:2888:3888
+              server.2=zookeeper-1.zookeeper:2888:3888
+              server.3=zookeeper-2.zookeeper:2888:3888
+              EOF
+              
+              exec /docker-entrypoint.sh zkServer.sh start-foreground
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /conf
+      volumes:
+        - name: config
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 5Gi

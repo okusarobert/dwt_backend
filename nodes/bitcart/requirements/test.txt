@@ -1,0 +1,9 @@
+async-asgi-testclient
+async-timeout
+codecov
+httpx
+pytest
+pytest-cov
+pytest-mock
+pytest-parametrization
+pytest-xdist

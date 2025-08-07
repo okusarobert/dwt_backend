@@ -1,0 +1,472 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:13
+    container_name: db
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASS}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    env_file:
+      - .env
+    networks:
+      - tondekanet
+
+  redis:
+    image: redis:6.2-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - tondekanet
+
+  db-migrate:
+    build:
+      context: .
+      dockerfile: ./auth/Dockerfile
+    # image: db_migrate_img
+    container_name: db_migrate
+    command: sh -c "alembic upgrade head"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DEV_MODE=1
+    volumes:
+      - "./auth:/app"
+      - "./db:/app/db"
+      - "./shared:/app/shared"
+      - "./alembic:/app/alembic"
+      - "./alembic.ini:/app/alembic.ini"
+      - "./scripts/entrypoint.sh:/app/entrypoint.sh"
+      - "./scripts/wait-for-it.sh:/app/wait-for-it.sh"
+    networks:
+      - tondekanet
+
+  auth:
+    build:
+      context: .
+      dockerfile: ./auth/Dockerfile
+    volumes:
+      - ./auth:/app
+      - ./db:/app/db
+      - ./shared:/app/shared
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./scripts/entrypoint.sh:/app/entrypoint.sh
+      - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
+
+    environment:
+      LAUNCH_TYPE: auth
+    env_file: ./.env
+    depends_on:
+      kafka:
+        condition: service_started
+      db:
+        condition: service_started
+    networks:
+      - tondekanet
+  grpc:
+    build:
+      context: .
+      dockerfile: ./auth/grpc.Dockerfile
+    volumes:
+      - ./auth:/app
+      - ./db:/app/db
+      - ./shared:/app/shared
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./scripts/entrypoint.sh:/app/entrypoint.sh
+      - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
+
+    environment:
+      LAUNCH_TYPE: grpc
+    env_file: ./.env
+    depends_on:
+      kafka:
+        condition: service_started
+      db:
+        condition: service_started
+    networks:
+      - tondekanet
+  wallet:
+    build:
+      context: .
+      dockerfile: ./wallet/Dockerfile
+    volumes:
+      - ./wallet:/app
+      - ./db:/app/db
+      - ./shared:/app/shared
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./scripts/entrypoint.sh:/app/entrypoint.sh
+      - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
+
+    environment:
+      LAUNCH_TYPE: wallet
+      PYTHONPATH: /app
+    env_file: ./.env
+    depends_on:
+      kafka:
+        condition: service_started
+      db:
+        condition: service_started
+      db-migrate:
+        condition: service_started
+    networks:
+      - tondekanet
+  # crypto:
+  #   build:
+  #     context: .
+  #     dockerfile: ./crypto/Dockerfile
+  #   volumes:
+  #     - ./crypto:/app
+  #     - ./db:/app/db
+  #     - ./shared:/app/shared
+  #     - ./alembic:/app/alembic
+  #     - ./alembic.ini:/app/alembic.ini
+  #     - ./scripts/entrypoint.sh:/app/entrypoint.sh
+  #     - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
+
+  #   environment:
+  #     LAUNCH_TYPE: crypto
+  #     PYTHONPATH: /app
+  #     LTC_HOST: ltc
+  #     LTC_PORT: 5001
+  #   env_file: ./.env
+  #   depends_on:
+  #     kafka:
+  #       condition: service_started
+  #     db:
+  #       condition: service_started
+
+  # networks:
+  #   - tondekanet
+  # websocket:
+  #   build:
+  #     context: .
+  #     dockerfile: ./websocket/Dockerfile
+  #   volumes:
+  #     - ./websocket:/app
+  #     - ./db:/app/db
+  #     - ./shared:/app/shared
+  #     - ./alembic:/app/alembic
+  #     - ./alembic.ini:/app/alembic.ini
+  #     - ./scripts/entrypoint.sh:/app/entrypoint.sh
+  #     - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
+
+  #   environment:
+  #     LAUNCH_TYPE: websocket
+  #     PYTHONPATH: /app
+  #   env_file: ./.env
+  #   depends_on:
+  #     kafka:
+  #       condition: service_started
+  #     db:
+  #       condition: service_started
+  #     db-migrate:
+  #       condition: service_started
+  #   networks:
+  #     - tondekanet
+
+  admin:
+    build:
+      context: .
+      dockerfile: ./admin/Dockerfile
+    volumes:
+      - ./admin:/app
+      - ./db:/app/db
+      - ./shared:/app/shared
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./uploads:/app/uploads
+      - ./scripts/entrypoint.sh:/app/entrypoint.sh
+      - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
+
+    environment:
+      LAUNCH_TYPE: admin
+    env_file: ./.env
+    depends_on:
+      - kafka
+      - db
+    networks:
+      - tondekanet
+
+  api:
+    build:
+      context: .
+      dockerfile: ./api/Dockerfile
+    volumes:
+      - ./api:/app
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./shared:/app/shared
+      - ./scripts/entrypoint.sh:/app/entrypoint.sh
+      - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
+
+    env_file: ./.env
+    environment:
+      LAUNCH_TYPE: api
+      PYTHONPATH: /app
+    depends_on:
+      - kafka
+      - db
+    networks:
+      - tondekanet
+
+  # client:
+  #   build:
+  #     context: ./client
+  #     dockerfile: ./Dockerfile
+  #     args:
+  #       - NODE_ENV=development
+  #   volumes:
+  #     - ./client/src:/app/src
+  #     - ./client/node_modules:/app/node_modules
+  #   env_file:
+  #     - ./client/.env
+  #   depends_on:
+  #     # - api
+  #     - db
+  #   networks:
+  #     - dwt_net
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    # container_name: nginx
+    restart: unless-stopped
+    ports:
+      - 3030:80
+    volumes:
+      - ./nginx/nginx-dev.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - db
+      - auth
+    networks:
+      - tondekanet
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.0.1
+    container_name: zookeeper
+    networks:
+      - tondekanet
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.0.1
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+    networks:
+      - tondekanet
+    depends_on:
+      - zookeeper
+
+  # trx:
+  #   build:
+  #     context: ./nodes
+  #     dockerfile: ./trx.Dockerfile
+  #   environment:
+  #     TRX_LOGIN: "okusa"
+  #     TRX_PASSWORD: "uQa4nq5kkDsjILyiDgxJc4bCVrLnt8NQRWsuHCB27jg"
+  #     TRX_SERVER: "https://tron-shasta.drpc.org"
+  #     TRX_PORT: "5009"
+  #     TRX_NETWORK: "mainnet"
+  #   networks:
+  #     - tondekanet
+  #   volumes:
+  #     - ./nodes/bitcart/daemons:/home/electrum/site/daemons
+  # eth:
+  #   build:
+  #     context: ./nodes
+  #     dockerfile: ./eth.Dockerfile
+  #   environment:
+  #     ETH_LOGIN: "okusa"
+  #     ETH_PASSWORD: "uQa4nq5kkDsjILyiDgxJc4bCVrLnt8NQRWsuHCB27jg"
+  #     ETH_SERVER: "https://linea-sepolia.infura.io/v3/9a9218c2feec4060b196368065df8fd0"
+  #     ETH_PORT: "5008"
+  #     ETH_NETWORK: "testnet"
+  #   networks:
+  #     - tondekanet
+  #   volumes:
+  #     - ./nodes/bitcart/daemons:/home/electrum/site/daemons
+  # pol:
+  #   build:
+  #     context: ./nodes
+  #     dockerfile: ./matic.Dockerfile
+  #   environment:
+  #     POL_LOGIN: "okusa"
+  #     POL_PASSWORD: "uQa4nq5kkDsjILyiDgxJc4bCVrLnt8NQRWsuHCB27jg"
+  #     POL_SERVER: "https://rpc-amoy.polygon.technology/"
+  #     POL_PORT: "5008"
+  #     POL_NETWORK: "testnet"
+  #   networks:
+  #     - tondekanet
+  #   volumes:
+  #     - ./nodes/bitcart/daemons:/home/electrum/site/daemons
+  # xmr:
+  #   build:
+  #     context: ./nodes
+  #     dockerfile: ./xmr.Dockerfile
+  #   environment:
+  #     XMR_LOGIN: "okusa"
+  #     XMR_PASSWORD: "uQa4nq5kkDsjILyiDgxJc4bCVrLnt8NQRWsuHCB27jg"
+  #     XMR_SERVER: "https://testnet.xmr.ditatompel.com"
+  #     XMR_PORT: "5008"
+  #     XMR_NETWORK: "testnet"
+  #   networks:
+  #     - tondekanet
+  #   volumes:
+  #     - ./nodes/bitcart/daemons:/home/electrum/site/daemons
+  # bnb:
+  #   build:
+  #     context: ./nodes
+  #     dockerfile: ./bnb.Dockerfile
+  #   environment:
+  #     BNB_LOGIN: "okusa"
+  #     BNB_PASSWORD: "uQa4nq5kkDsjILyiDgxJc4bCVrLnt8NQRWsuHCB27jg"
+  #     BNB_SERVER: "https://bsc-testnet-dataseed.bnbchain.org"
+  #     BNB_NETWORK: "testnet"
+  #   networks:
+  #     - tondekanet
+  #   volumes:
+  #     - ./nodes/bitcart/daemons:/home/electrum/site/daemons
+  # btc:
+  #   build:
+  #     context: ./nodes
+  #     dockerfile: ./btc.Dockerfile
+  #   environment:
+  #     BTC_NETWORK: "testnet"
+  #     BTC_LOGIN: "okusa"
+  #     BTC_PASSWORD: "uQa4nq5kkDsjILyiDgxJc4bCVrLnt8NQRWsuHCB27jg"
+  #   networks:
+  #     - tondekanet
+  #   volumes:
+  #     - ./nodes/bitcart/daemons:/home/electrum/site/daemons
+
+  # btc_processor:
+  #   build:
+  #     context: .
+  #     dockerfile: ./btc_processor/Dockerfile
+  #   volumes:
+  #     - ./btc_processor:/app
+  #     - ./db:/app/db
+  #     - ./shared:/app/shared
+  #     - ./alembic:/app/alembic
+  #     - ./alembic.ini:/app/alembic.ini
+  #     - ./scripts/entrypoint.sh:/app/entrypoint.sh
+  #     - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
+
+  #   environment:
+  #     LAUNCH_TYPE: btc_processor
+  #     PYTHONPATH: /app
+  #     # BTC_HOST: btc
+  #     # BTC_PORT: 5000
+  #     # BTC_USER: okusa
+  #     # BTC_PASS: uQa4nq5kkDsjILyiDgxJc4bCVrLnt8NQRWsuHCB27jg
+  #   env_file: ./.env
+  #   depends_on:
+  #     kafka:
+  #       condition: service_started
+  #     db:
+  #       condition: service_started
+  #     btc:
+  #       condition: service_started
+
+  #   networks:
+  #     - tondekanet
+  # ltc:
+  #   build:
+  #     context: ./nodes
+  #     dockerfile: ./ltc.Dockerfile
+  #   environment:
+  #     LTC_NETWORK: "testnet"
+  #     LTC_LOGIN: "okusa"
+  #     LTC_PASSWORD: "uQa4nq5kkDsjILyiDgxJc4bCVrLnt8NQRWsuHCB27jg"
+  #     # LTC_SERVER: "electrum-ltc-testnet.criptolayer.net:51001"
+  #     # LTC_ONESERVER: "true"
+  #     LTC_POLLING_CAP: "5"
+  #     LTC_REQUEST_TIMEOUT: "60"
+  #     LTC_REQUEST_RETRY_DELAY: "30"
+  #   networks:
+  #     - tondekanet
+  #   volumes:
+  #     - ./nodes/bitcart/daemons:/home/electrum/site/daemons
+  # bch:
+  #   build:
+  #     context: ./nodes
+  #     dockerfile: ./bch.Dockerfile
+  #   environment:
+  #     BCH_NETWORK: "testnet"
+  #     BCH_LOGIN: "okusa"
+  #     BCH_PASSWORD: "uQa4nq5kkDsjILyiDgxJc4bCVrLnt8NQRWsuHCB27jg"
+  #   networks:
+  #     - tondekanet
+  #   volumes:
+  #     - ./nodes/bitcart/daemons:/home/electrum/site/daemons
+
+  bitcoin:
+    image: ruimarinho/bitcoin-core:latest
+    container_name: bitcoin
+    restart: unless-stopped
+    environment:
+      BITCOIN_NETWORK: testnet
+    ports:
+      - "18332:18332" # RPC
+      - "18333:18333" # P2P
+    volumes:
+      - bitcoin_data:/home/bitcoin/.bitcoin
+      - ./bitcoin.conf:/home/bitcoin/.bitcoin/bitcoin.conf
+    networks:
+      - tondekanet
+
+  litecoin:
+    build:
+      context: .
+      dockerfile: Dockerfile.litecoin
+    container_name: litecoin
+    restart: unless-stopped
+    ports:
+      - "19332:19332" # RPC
+      - "19333:19333" # P2P
+    volumes:
+      - litecoin_data:/litecoin/.litecoin
+    networks:
+      - tondekanet
+
+networks:
+  tondekanet:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  bitcoin_data:
+  litecoin_data:

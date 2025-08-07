@@ -1,0 +1,6 @@
+bitcart>=0.4.0
+aiohttp>=3.8.0
+asyncio
+psycopg2-binary
+sqlalchemy
+python-dotenv 

@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin
+  namespace: tondeka-app
+  labels:
+    app: admin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: admin
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 10
+  template:
+    metadata:
+      labels:
+        app: admin
+    spec:
+      containers:
+        - name: admin
+          image: registry.digitalocean.com/tondeka/admin:latest
+          ports:
+            - containerPort: 3000
+          volumeMounts:
+          - name: static-storage
+            mountPath: /app/uploads
+          envFrom:
+            - configMapRef:
+                name: admin-configmap
+            - configMapRef:
+                name: general-configmap
+            - secretRef:
+                name: admin-secret
+            - secretRef:
+                name: general-secret
+      volumes:
+      - name: static-storage
+        nfs:
+          path: /tondeka/
+          readOnly: false
+          server: 10.108.0.7

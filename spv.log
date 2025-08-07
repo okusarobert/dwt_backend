@@ -1,0 +1,12 @@
+2025-08-04 21:00:04,498 - INFO - Starting SPV API server on http://localhost:5003
+ * Serving Flask app 'spv'
+ * Debug mode: on
+2025-08-04 21:00:04,630 - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5003
+ * Running on http://192.168.100.235:5003
+2025-08-04 21:00:04,630 - INFO - [33mPress CTRL+C to quit[0m
+2025-08-04 21:00:04,631 - INFO -  * Restarting with stat
+2025-08-04 21:00:05,067 - INFO - Starting SPV API server on http://localhost:5003
+2025-08-04 21:00:05,108 - WARNING -  * Debugger is active!
+2025-08-04 21:00:05,136 - INFO -  * Debugger PIN: 939-259-764

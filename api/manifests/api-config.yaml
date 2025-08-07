@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-configmap
+  namespace: tondeka-app
+data:
+  AUTH_SERVICE_URL: "http://auth:8000"
+  ADMIN_SERVICE_URL: "http://admin:8000"
+  WALLET_SERVICE_URL: "http://wallet:8000"

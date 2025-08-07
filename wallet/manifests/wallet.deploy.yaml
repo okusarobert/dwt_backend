@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wallet
+  namespace: tondeka-app
+  labels:
+    app: wallet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wallet
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 10
+  template:
+    metadata:
+      labels:
+        app: wallet
+    spec:
+      containers:
+        - name: wallet
+          image: registry.digitalocean.com/tondeka/wallet:latest
+          ports:
+            - containerPort: 3000
+          volumeMounts:
+          - name: static-storage
+            mountPath: /app/uploads
+          envFrom:
+            - configMapRef:
+                name: wallet-configmap
+            - configMapRef:
+                name: general-configmap
+            - secretRef:
+                name: wallet-secret
+            - secretRef:
+                name: general-secret
+      volumes:
+      - name: static-storage
+        nfs:
+          path: /tondeka/
+          readOnly: false
+          server: 10.108.0.7
+      initContainers:
+      - name: wait-for-kafka
+        image: busybox
+        command: ['sh', '-c', 'until nc -z kafka 9092; do echo waiting for kafka; sleep 2; done;']

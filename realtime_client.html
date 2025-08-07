@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>SPV Real-Time Monitor</title>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+	<style>
+		body {
+			font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+			max-width: 1200px;
+			margin: 0 auto;
+			padding: 20px;
+			background-color: #f5f5f5;
+		}
+
+		.container {
+			background: white;
+			border-radius: 10px;
+			padding: 20px;
+			box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+		}
+
+		.header {
+			text-align: center;
+			margin-bottom: 30px;
+		}
+
+		.status {
+			padding: 10px;
+			border-radius: 5px;
+			margin: 10px 0;
+			font-weight: bold;
+		}
+
+		.connected {
+			background-color: #d4edda;
+			color: #155724;
+		}
+
+		.disconnected {
+			background-color: #f8d7da;
+			color: #721c24;
+		}
+
+		.controls {
+			display: flex;
+			gap: 10px;
+			margin-bottom: 20px;
+			flex-wrap: wrap;
+		}
+
+		input,
+		button {
+			padding: 10px;
+			border: 1px solid #ddd;
+			border-radius: 5px;
+			font-size: 14px;
+		}
+
+		input {
+			flex: 1;
+			min-width: 200px;
+		}
+
+		button {
+			background-color: #007bff;
+			color: white;
+			cursor: pointer;
+			border: none;
+		}
+
+		button:hover {
+			background-color: #0056b3;
+		}
+
+		button:disabled {
+			background-color: #6c757d;
+			cursor: not-allowed;
+		}
+
+		.events {
+			max-height: 400px;
+			overflow-y: auto;
+			border: 1px solid #ddd;
+			border-radius: 5px;
+			padding: 10px;
+			background-color: #f8f9fa;
+		}
+
+		.event {
+			margin: 10px 0;
+			padding: 10px;
+			border-radius: 5px;
+			border-left: 4px solid #007bff;
+			background-color: white;
+		}
+
+		.event.balance {
+			border-left-color: #28a745;
+		}
+
+		.event.transaction {
+			border-left-color: #ffc107;
+		}
+
+		.event.error {
+			border-left-color: #dc3545;
+		}
+
+		.event.info {
+			border-left-color: #17a2b8;
+		}
+
+		.timestamp {
+			color: #6c757d;
+			font-size: 12px;
+		}
+
+		.address {
+			font-weight: bold;
+			color: #007bff;
+		}
+
+		.amount {
+			font-weight: bold;
+			color: #28a745;
+		}
+
+		.clear-btn {
+			background-color: #dc3545;
+		}
+
+		.clear-btn:hover {
+			background-color: #c82333;
+		}
+	</style>
+</head>
+
+<body>
+	<div class="container">
+		<div class="header">
+			<h1>🔌 SPV Real-Time Transaction Monitor</h1>
+			<p>Monitor Bitcoin addresses for real-time balance changes and new transactions</p>
+		</div>
+
+		<div id="status" class="status disconnected">
+			🔴 Disconnected
+		</div>
+
+		<div class="controls">
+			<input type="text" id="addressInput"
+				placeholder="Enter Bitcoin address (e.g., n43gfthwVPBopwaTMjmpMAT4Nqzf95NKcy)" />
+			<button id="subscribeBtn" onclick="subscribeAddress()">📡 Subscribe</button>
+			<button id="unsubscribeBtn" onclick="unsubscribeAddress()" disabled>📡 Unsubscribe</button>
+			<button class="clear-btn" onclick="clearEvents()">🗑️ Clear Events</button>
+		</div>
+
+		<div>
+			<h3>📊 Real-Time Events</h3>
+			<div id="events" class="events">
+				<div class="event info">
+					<div class="timestamp">Waiting for connection...</div>
+					<div>Connect to start monitoring transactions in real-time</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<script>
+		let socket;
+		let currentAddress = null;
+
+		// Initialize WebSocket connection
+		function initSocket() {
+			socket = io('http://localhost:5005');
+
+			socket.on('connect', function () {
+				document.getElementById('status').className = 'status connected';
+				document.getElementById('status').innerHTML = '🟢 Connected to SPV Server';
+				addEvent('info', 'Connected to SPV real-time monitoring server');
+			});
+
+			socket.on('disconnect', function () {
+				document.getElementById('status').className = 'status disconnected';
+				document.getElementById('status').innerHTML = '🔴 Disconnected';
+				addEvent('error', 'Disconnected from server');
+			});
+
+			socket.on('connected', function (data) {
+				addEvent('info', data.message);
+			});
+
+			socket.on('subscribed', function (data) {
+				currentAddress = data.address;
+				document.getElementById('unsubscribeBtn').disabled = false;
+				document.getElementById('subscribeBtn').disabled = true;
+				addEvent('info', `Subscribed to real-time updates for ${data.address}`);
+			});
+
+			socket.on('unsubscribed', function (data) {
+				currentAddress = null;
+				document.getElementById('unsubscribeBtn').disabled = true;
+				document.getElementById('subscribeBtn').disabled = false;
+				addEvent('info', `Unsubscribed from ${data.address}`);
+			});
+
+			socket.on('balance_change', function (data) {
+				const oldBtc = (data.old_balance / 100000000).toFixed(8);
+				const newBtc = (data.new_balance / 100000000).toFixed(8);
+				const change = data.new_balance - data.old_balance;
+				const changeBtc = (change / 100000000).toFixed(8);
+				const changeText = change > 0 ? `+${changeBtc} BTC` : `${changeBtc} BTC`;
+
+				addEvent('balance', `
+                    <span class="address">${data.address}</span> balance changed:<br>
+                    <span class="amount">${oldBtc} BTC</span> → <span class="amount">${newBtc} BTC</span><br>
+                    Change: <span class="amount">${changeText}</span>
+                `);
+			});
+
+			socket.on('new_transactions', function (data) {
+				addEvent('transaction', `
+                    <span class="address">${data.address}</span> received <span class="amount">${data.count}</span> new transaction(s)<br>
+                    <small>Transaction IDs: ${data.transactions.map(tx => tx.txid?.substring(0, 16) + '...').join(', ')}</small>
+                `);
+			});
+
+			socket.on('error', function (data) {
+				addEvent('error', `Error: ${data.message}`);
+			});
+		}
+
+		function subscribeAddress() {
+			const address = document.getElementById('addressInput').value.trim();
+			if (!address) {
+				alert('Please enter a Bitcoin address');
+				return;
+			}
+
+			if (socket && socket.connected) {
+				socket.emit('subscribe_address', { address: address });
+			} else {
+				addEvent('error', 'Not connected to server');
+			}
+		}
+
+		function unsubscribeAddress() {
+			if (socket && socket.connected && currentAddress) {
+				socket.emit('unsubscribe_address', { address: currentAddress });
+			}
+		}
+
+		function addEvent(type, message) {
+			const eventsDiv = document.getElementById('events');
+			const eventDiv = document.createElement('div');
+			eventDiv.className = `event ${type}`;
+
+			const timestamp = new Date().toLocaleTimeString();
+			eventDiv.innerHTML = `
+                <div class="timestamp">${timestamp}</div>
+                <div>${message}</div>
+            `;
+
+			eventsDiv.appendChild(eventDiv);
+			eventsDiv.scrollTop = eventsDiv.scrollHeight;
+		}
+
+		function clearEvents() {
+			document.getElementById('events').innerHTML = `
+                <div class="event info">
+                    <div class="timestamp">Events cleared</div>
+                    <div>Ready for new events</div>
+                </div>
+            `;
+		}
+
+		// Initialize when page loads
+		window.onload = function () {
+			initSocket();
+		};
+	</script>
+</body>
+
+</html>

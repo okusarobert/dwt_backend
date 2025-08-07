@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: websocket
+  namespace: tondeka-app
+  labels:
+    app: websocket
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: websocket
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 10
+  template:
+    metadata:
+      labels:
+        app: websocket
+    spec:
+      containers:
+        - name: websocket
+          image: registry.digitalocean.com/tondeka/websocket:latest
+          ports:
+            - containerPort: 5000
+          volumeMounts:
+          - name: static-storage
+            mountPath: /app/uploads
+          envFrom:
+            - configMapRef:
+                name: websocket-configmap
+            - configMapRef:
+                name: general-configmap
+            - secretRef:
+                name: websocket-secret
+            - secretRef:
+                name: general-secret
+      volumes:
+      - name: static-storage
+        nfs:
+          path: /tondeka/
+          readOnly: false
+          server: 10.108.0.7

@@ -1,0 +1,25 @@
+-r base.txt
+aiofiles
+alembic
+bitcart
+email-validator
+fastapi
+fido2
+gino
+hiredis
+Jinja2
+msgpack
+notifiers
+packaging
+paramiko
+passlib[bcrypt]
+psycopg2-binary
+pyotp
+python-dateutil
+python-dotenv
+python-multipart
+redis
+sqlalchemy<1.4
+uvicorn[standard]
+ip2geotools
+django

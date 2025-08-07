@@ -1,0 +1,54 @@
+version: "3.8"
+
+services:
+  litecoin-node:
+    build: .
+    container_name: litecoin-pruned-node
+    restart: unless-stopped
+    ports:
+      - "9332:9332" # RPC port
+      - "9333:9333" # P2P port
+    volumes:
+      - litecoin_data:/home/litecoin/.litecoin
+    environment:
+      - LITECOIN_DATA=/home/litecoin/.litecoin
+    networks:
+      - litecoin_network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "litecoin-cli",
+          "-conf=/home/litecoin/.litecoin/litecoin.conf",
+          "getblockchaininfo",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+
+  litecoin-api:
+    build: ../client
+    container_name: litecoin-api
+    restart: unless-stopped
+    ports:
+      - "5007:5007" # API port
+    volumes:
+      - ./api_config.py:/app/config.py
+    environment:
+      - LITECOIN_RPC_HOST=litecoin-node
+      - LITECOIN_RPC_PORT=9332
+      - LITECOIN_RPC_USER=litecoin_rpc_user
+      - LITECOIN_RPC_PASSWORD=your_secure_password_here_change_this
+    depends_on:
+      - litecoin-node
+    networks:
+      - litecoin_network
+
+volumes:
+  litecoin_data:
+    driver: local
+
+networks:
+  litecoin_network:
+    driver: bridge

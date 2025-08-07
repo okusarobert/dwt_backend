@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grpc
+  namespace: tondeka-app
+  labels:
+    app: grpc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grpc
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 10
+  template:
+    metadata:
+      labels:
+        app: grpc
+    spec:
+      containers:
+        - name: grpc
+          image: registry.digitalocean.com/tondeka/grpc:latest
+          ports:
+            - containerPort: 50051
+          volumeMounts:
+          - name: static-storage
+            mountPath: /app/uploads
+          envFrom:
+            - configMapRef:
+                name: grpc-configmap
+            - configMapRef:
+                name: general-configmap
+            - secretRef:
+                name: grpc-secret
+            - secretRef:
+                name: general-secret
+      volumes:
+      - name: static-storage
+        nfs:
+          path: /tondeka/
+          readOnly: false
+          server: 10.108.0.7

@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package auth;
+
+service AuthService {
+  rpc QRLogin(QRLoginRequest) returns (QRLoginResponse);
+  rpc CompleteProfile(CompleteProfileRequest) returns (CompleteProfileResponse);
+  rpc EmailLogin(EmailLoginRequest) returns (EmailLoginResponse);
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+}
+
+message QRLoginRequest {
+  string account_ref = 1;
+}
+
+message QRLoginResponse {
+  string status = 1; // "success" or "incomplete_profile"
+  string user_id = 2;
+  string token = 3;
+}
+
+message CompleteProfileRequest {
+  string user_id = 1;
+  string first_name = 2;
+  string last_name = 3;
+  string email = 4;
+  string phone_number = 5;
+  string country = 6;
+}
+
+message CompleteProfileResponse {
+  string status = 1;
+}
+
+message EmailLoginRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message EmailLoginResponse {
+  string token = 1;
+}
+
+message RegisterRequest {
+  string email = 1;
+  string phone_number = 2;
+  string first_name = 3;
+  string last_name = 4;
+  string password = 5;
+  string password_confirm = 6;
+  string sponsor_code = 7;
+  string country = 8;
+}
+
+message RegisterResponse {
+  string status = 1; // "success" or error type
+  string user_id = 2;
+  string error = 3;
+  string uri = 4;
+} 

@@ -1,0 +1,13 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tondeka-app
+  namespace: tondeka-app
+spec:
+  dnsNames:
+    - tondeka.digital
+    - www.tondeka.digital
+  secretName: tondeka-app-tls
+  issuerRef:
+    name: letsencrypt-cluster-issuer
+    kind: ClusterIssuer

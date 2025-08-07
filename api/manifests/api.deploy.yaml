@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: tondeka-app
+  labels:
+    app: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 10
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          image: registry.digitalocean.com/tondeka/api:latest
+          ports:
+            - containerPort: 3000
+          volumeMounts:
+          - name: static-storage
+            mountPath: /app/uploads
+          envFrom:
+            - configMapRef:
+                name: api-configmap
+            - configMapRef:
+                name: general-configmap
+            - secretRef:
+                name: api-secret
+            - secretRef:
+                name: general-secret
+      volumes:
+      - name: static-storage
+        nfs:
+          path: /toibets/
+          readOnly: false
+          server: 10.108.0.7

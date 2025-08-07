@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bitcart"
+version = "0.1.0"
+description = "Bitcart daemon services"
+requires-python = ">=3.8"
+dependencies = [
+    "python-decouple",
+    "setuptools",
+]
+
+[project.optional-dependencies]
+xmr = [
+    "aiohttp<4.0",
+    "monero",
+    "universalasync",
+]
+
+[project.scripts]
+xmr = "daemons.xmr:main"
+
+[tool.uv]
+dev-dependencies = [] 

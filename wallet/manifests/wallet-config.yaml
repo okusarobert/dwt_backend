@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wallet-configmap
+  namespace: tondeka-app
+data:
+  RELWORX_BASE_URL: "https://payments.relworx.com/api"

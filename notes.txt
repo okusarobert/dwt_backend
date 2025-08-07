@@ -1,0 +1,74 @@
+# Install NFS server
+sudo apt update
+sudo apt install nfs-kernel-server -y
+
+# Create shared directory
+sudo mkdir -p /tondeka
+sudo chown nobody:nogroup /tondeka
+sudo chmod 755 /tondeka
+
+# Configure NFS exports
+sudo nano /etc/exports
+
+docker-compose exec wallet python -c "
+import blockcypher
+print('Available functions in blockcypher:')
+print([attr for attr in dir(blockcypher) if not attr.startswith('_')])
+"
+
+
+// deployment plan
+
+1. Create and push the  images
+	- wallet -> done
+	- auth -> done
+	- grpc -> done
+	- api -> done
+	- admin -> done
+	- websocket -> pending
+
+2. Deploy the manifests
+	- wallet -> done
+	- auth -> done
+	- grpc -> done
+	- api -> done
+	- admin -> done
+	- websocket -> pending
+
+
+# Start SPV client
+curl -X POST http://localhost:5003/start
+
+# Add address to watch
+curl -X POST http://localhost:5003/add_address -H "Content-Type: application/json" -d '{"address": "msxtM27m4i3iz1jb955uKCRtvggvnF1Z1T"}'
+
+# Scan historical blocks for this address
+curl -X POST http://localhost:5003/scan_history/msxtM27m4i3iz1jb955uKCRtvggvnF1Z1T -H "Content-Type: application/json" -d '{"blocks_back": 100}'
+
+# Get transactions for this address
+curl http://localhost:5003/transactions/msxtM27m4i3iz1jb955uKCRtvggvnF1Z1T
+
+curl -X POST http://localhost:5005/scan_history/mt4Vd5HFw2C8BZDbEGDxdhAGYYdsJCazoh \
+  -H "Content-Type: application/json" \
+  -d '{"blocks_back": 10000}'
+
+  curl -X POST http://localhost:5005/scan_history/mt4Vd5HFw2C8BZDbEGDxdhAGYYdsJCazoh \
+  -H "Content-Type: application/json" \
+  -d '{"blocks_back": 15000}'
+
+
+  Coins with webhook -> solana
+  -> world chain
+  -> ethereum
+  -> bitcoin
+  -> litecoin
+  -> tron
+
+  L2 ETH
+  - worldchain
+  - polygon
+  - bnb
+  - optimism
+  - base
+  - avalanche
+  
