@@ -1,45 +1,226 @@
-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
-<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<!DOCTYPE html>
 <html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Verify Your Email - DT Exchange</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Roboto, sans-serif;
+        background-color: #f7f9fa;
+        color: #2c2e2f;
+        line-height: 1.6;
+      }
+      .container {
+        max-width: 600px;
+        margin: 0 auto;
+        background-color: #ffffff;
+        border-radius: 16px;
+        overflow: hidden;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+      }
+      .header {
+        background: linear-gradient(135deg, #0070ba 0%, #1546a0 100%);
+        padding: 40px 30px;
+        text-align: center;
+        color: white;
+      }
+      .logo {
+        font-size: 28px;
+        font-weight: 700;
+        margin-bottom: 10px;
+        letter-spacing: -0.5px;
+      }
+      .subtitle {
+        font-size: 16px;
+        opacity: 0.9;
+        font-weight: 400;
+      }
+      .content {
+        padding: 40px 30px;
+        text-align: center;
+      }
+      .title {
+        font-size: 24px;
+        font-weight: 600;
+        color: #2c2e2f;
+        margin-bottom: 16px;
+        letter-spacing: -0.3px;
+      }
+      .description {
+        font-size: 16px;
+        color: #6b7c93;
+        margin-bottom: 32px;
+        line-height: 1.6;
+      }
+      .otp-container {
+        background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+        border: 2px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 24px;
+        margin: 32px 0;
+        display: inline-block;
+      }
+      .otp-label {
+        font-size: 14px;
+        color: #6b7c93;
+        margin-bottom: 16px;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .otp-code {
+        font-size: 36px;
+        font-weight: 700;
+        color: #0070ba;
+        letter-spacing: 8px;
+        font-family: "JetBrains Mono", monospace;
+        background: white;
+        padding: 16px 24px;
+        border-radius: 8px;
+        border: 2px solid #e2e8f0;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+      }
+      .info-box {
+        background-color: #f1f5f9;
+        border-left: 4px solid #0070ba;
+        padding: 20px;
+        margin: 24px 0;
+        border-radius: 8px;
+        text-align: left;
+      }
+      .info-title {
+        font-weight: 600;
+        color: #2c2e2f;
+        margin-bottom: 8px;
+        font-size: 14px;
+      }
+      .info-text {
+        color: #6b7c93;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .footer {
+        background-color: #f8fafc;
+        padding: 24px 30px;
+        text-align: center;
+        border-top: 1px solid #e2e8f0;
+      }
+      .footer-text {
+        color: #94a3b8;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .support-link {
+        color: #0070ba;
+        text-decoration: none;
+        font-weight: 500;
+      }
+      .support-link:hover {
+        text-decoration: underline;
+      }
+      .disclaimer {
+        background-color: #fef2f2;
+        border: 1px solid #fecaca;
+        border-radius: 8px;
+        padding: 16px;
+        margin: 24px 0;
+        text-align: left;
+      }
+      .disclaimer-title {
+        color: #dc2626;
+        font-weight: 600;
+        font-size: 14px;
+        margin-bottom: 8px;
+      }
+      .disclaimer-text {
+        color: #7f1d1d;
+        font-size: 12px;
+        line-height: 1.4;
+      }
+      @media only screen and (max-width: 600px) {
+        .container {
+          margin: 20px;
+          border-radius: 12px;
+        }
+        .header,
+        .content,
+        .footer {
+          padding: 24px 20px;
+        }
+        .otp-code {
+          font-size: 28px;
+          letter-spacing: 6px;
+          padding: 12px 16px;
+        }
+        .title {
+          font-size: 20px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <div class="logo">DT Exchange</div>
+        <div class="subtitle">Secure Crypto Trading Platform</div>
+      </div>
 
-  <head data-id="__react-email-head"></head>
+      <div class="content">
+        <h1 class="title">Verify Your Email Address</h1>
+        <p class="description">
+          Welcome to DT Exchange! To complete your account setup and start
+          trading, please verify your email address using the code below.
+        </p>
 
-  <body data-id="__react-email-body" style="background-color:#ffffff;font-family:HelveticaNeue,Helvetica,Arial,sans-serif">
-    <table align="center" width="100%" data-id="__react-email-container" role="presentation" cellSpacing="0" cellPadding="0" border="0" style="max-width:37.5em;background-color:#ffffff;border:1px solid #eee;border-radius:5px;box-shadow:0 5px 10px rgba(20,50,70,.2);margin-top:20px;width:360px;margin:0 auto">
-      <tbody>
-        <tr style="width:100%">
-          <td>
-            <h1 data-id="react-email-heading" style="text-align:center">BlockBrite</h1>
-            <p data-id="react-email-text" style="font-size:11px;line-height:16px;margin:16px 8px 8px 8px;color:#0a85ea;font-weight:700;font-family:HelveticaNeue,Helvetica,Arial,sans-serif;height:16px;letter-spacing:0;text-transform:uppercase;text-align:center">Verify your account</p>
-            <h1 data-id="react-email-heading" style="color:#000;display:inline-block;font-family:HelveticaNeue-Medium,Helvetica,Arial,sans-serif;font-size:16px;font-weight:500;line-height:24px;margin-bottom:0;margin-top:0;text-align:center">Enter the following code to verify your BlockBrite account.</h1>
-            <table align="center" width="100%" data-id="react-email-section" style="background:rgba(0,0,0,.05);border-radius:4px;margin:16px auto 14px;vertical-align:middle;width:280px" border="0" cellPadding="0" cellSpacing="0" role="presentation">
-              <tbody>
-                <tr>
-                  <td>
-                    <p data-id="react-email-text" style="font-size:32px;line-height:40px;margin:0 auto;color:#000;display:inline-block;font-family:HelveticaNeue-Bold;font-weight:700;letter-spacing:6px;padding-bottom:8px;padding-top:8px;width:100%;text-align:center">{code}</p>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-            <p data-id="react-email-text" style="font-size:15px;line-height:23px;margin:0;color:#444;font-family:HelveticaNeue,Helvetica,Arial,sans-serif;letter-spacing:0;padding:0 40px;text-align:center">Not expecting this email?</p>
-            <p data-id="react-email-text" style="font-size:15px;line-height:23px;margin:0;color:#444;font-family:HelveticaNeue,Helvetica,Arial,sans-serif;letter-spacing:0;padding:0 40px;text-align:center">Contact <a href="mailto:support@tradegenesis.io" data-id="react-email-link" target="_blank" style="color:#444;text-decoration:underline">support@tradegenesis.io</a> if you did not create an account with us.</p>
-            <table align="center" width="100%" data-id="__react-email-container" role="presentation" cellSpacing="0" cellPadding="0" border="0" style="max-width:37.5em;color:#aaa;background:#000;font-size:12px;font-weight:800;letter-spacing:0;line-height:23px;margin:0;margin-top:20px;font-family:HelveticaNeue,Helvetica,Arial,sans-serif;text-align:center;text-transform:uppercase">
-              <tbody>
-                <tr style="width:100%">
-                  <td>
-                    <p data-id="react-email-text" style="font-size:14px;line-height:24px;margin:16px 0">DISCLAIMER:<br />Cryptocurrency investments and transactions involve significant risks. Prices are highly volatile and can be affected by external factors such as market trends, regulations, and technological developments. You should only invest or transact funds that you are prepared to lose.</p>
-                    <p data-id="react-email-text" style="font-size:14px;line-height:24px;margin:16px 0">We do not provide financial, investment, legal, or tax advice. The information provided on this platform is for informational purposes only and should not be considered professional advice. Always consult with a qualified professional or conduct your own research before making financial decisions.</p>
-                    <p data-id="react-email-text" style="font-size:14px;line-height:24px;margin:16px 0">By using our services, you acknowledge that we are not responsible for any losses, damages, or liabilities incurred as a result of using or relying on our platform.</p>
-                    <p data-id="react-email-text" style="font-size:14px;line-height:24px;margin:16px 0;font-weight:bold">Warning</p>
-                    <p data-id="react-email-text" style="font-size:14px;line-height:24px;margin:16px 0">Cryptocurrency transactions may be irreversible. Ensure all details are accurate before proceeding. Beware of phishing attempts, scams, and unauthorized access to your wallet. Secure your private keys and use strong security measures.</p>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </td>
-        </tr>
-      </tbody>
-    </table>
+        <div class="otp-container">
+          <div class="otp-label">Verification Code</div>
+          <div class="otp-code">{code}</div>
+        </div>
+
+        <div class="info-box">
+          <div class="info-title">📧 Where to enter this code</div>
+          <div class="info-text">
+            Return to the DT Exchange website and enter this 6-digit code in the
+            verification form. The code will expire in 10 minutes for security.
+          </div>
+        </div>
+
+        <div class="info-box">
+          <div class="info-title">🔒 Security Notice</div>
+          <div class="info-text">
+            Never share this code with anyone. DT Exchange staff will never ask
+            for your verification code via email, phone, or chat.
+          </div>
+        </div>
+
+        <div class="disclaimer">
+          <div class="disclaimer-title">⚠️ Important Disclaimer</div>
+          <div class="disclaimer-text">
+            Cryptocurrency investments involve significant risks. Prices are
+            highly volatile and can be affected by market trends, regulations,
+            and technological developments. Only invest funds you are prepared
+            to lose. We do not provide financial advice.
+          </div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <p class="footer-text">
+          If you didn't create an account with DT Exchange, please ignore this
+          email.<br />
+          Need help? Contact our support team at
+          <a href="mailto:support@badix.io" class="support-link"
+            >support@badix.io</a
+          >
+        </p>
+        <p class="footer-text" style="margin-top: 16px">
+          © 2024 DT Exchange. All rights reserved.
+        </p>
+      </div>
+    </div>
   </body>
-
 </html>

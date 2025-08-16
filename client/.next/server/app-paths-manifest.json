@@ -1,0 +1,7 @@
+{
+  "/auth/signin/page": "app/auth/signin/page.js",
+  "/convert/page": "app/convert/page.js",
+  "/portfolio/page": "app/portfolio/page.js",
+  "/dashboard/page": "app/dashboard/page.js",
+  "/trading/page": "app/trading/page.js"
+}

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eth-monitor-config
+  namespace: default
+  labels:
+    app: eth-monitor
+data:
+  ETH_NETWORK: "mainnet"
+  LOG_LEVEL: "INFO"
+  HEALTH_CHECK_INTERVAL: "30"
+  TRANSACTION_CONFIRMATIONS: "12"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  ETH_ADDRESS_TOPIC: "ethereum-address-events" 

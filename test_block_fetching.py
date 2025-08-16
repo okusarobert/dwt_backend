@@ -1,96 +1,67 @@
 #!/usr/bin/env python3
 """
-Test script to debug block fetching
+Test script to verify block fetching from Alchemy API
 """
 
-import bitcoinlib
-from bitcoinlib.services.services import Service
+import requests
+import json
+from decouple import config
 
-def test_block_fetching():
-    """Test block fetching directly"""
-    print("🔍 Testing Block Fetching")
-    print("=" * 50)
+def test_get_block_with_transactions():
+    """Test fetching a block with transactions from Alchemy API"""
+    api_key = config('ALCHEMY_API_KEY', default='')
+    if not api_key:
+        print("❌ ALCHEMY_API_KEY not found")
+        return
+    
+    url = f"https://eth-sepolia.g.alchemy.com/v2/{api_key}"
+    
+    # Test block 8935058 (where our transaction was mined)
+    block_number = 8935058
+    
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "eth_getBlockByNumber",
+        "params": [hex(block_number), True],  # True to include full transaction objects
+        "id": 1
+    }
     
     try:
-        # Initialize service
-        service = Service(network='testnet')
-        print(f"✅ Service initialized")
+        response = requests.post(url, json=payload)
+        result = response.json()
         
-        # Get current block height
-        current_height = service.blockcount()
-        print(f"✅ Current block height: {current_height}")
-        
-        # Test getting a block by height
-        test_height = current_height
-        print(f"\n🧪 Testing getblock with height {test_height}")
-        
-        try:
-            block_info = service.getblock(test_height)
-            print(f"✅ getblock returned: {type(block_info)}")
+        if 'result' in result and result['result']:
+            block_data = result['result']
+            transactions = block_data.get("transactions", [])
             
-            if block_info:
-                print(f"📊 Block info attributes:")
-                for attr in dir(block_info):
-                    if not attr.startswith('_'):
-                        try:
-                            value = getattr(block_info, attr)
-                            if not callable(value):
-                                print(f"   {attr}: {value}")
-                        except Exception as e:
-                            print(f"   {attr}: Error accessing - {e}")
+            print(f"✅ Block {block_number} fetched successfully")
+            print(f"   Transactions in block: {len(transactions)}")
+            
+            # Look for our specific transaction
+            target_tx = "0xf7f728234765d60f757cd6084419da7fc28ad3410272a937af2bc5c3c1192aac"
+            found = False
+            
+            for tx in transactions:
+                if tx.get("hash") == target_tx:
+                    found = True
+                    print(f"✅ Found our transaction in block!")
+                    print(f"   From: {tx.get('from', 'N/A')}")
+                    print(f"   To: {tx.get('to', 'N/A')}")
+                    print(f"   Value: {int(tx.get('value', '0'), 16)} wei")
+                    break
+            
+            if not found:
+                print(f"❌ Transaction {target_tx} not found in block {block_number}")
+                print("   This might explain why eth_monitor didn't detect it")
                 
-                # Try to access specific attributes
-                print(f"\n🔍 Testing specific attributes:")
-                
-                # Test block_hash
-                if hasattr(block_info, 'block_hash'):
-                    print(f"   block_hash: {block_info.block_hash}")
-                    print(f"   block_hash.hex(): {block_info.block_hash.hex()}")
-                else:
-                    print(f"   block_hash: Not available")
-                
-                # Test version
-                if hasattr(block_info, 'version'):
-                    print(f"   version: {block_info.version}")
-                else:
-                    print(f"   version: Not available")
-                
-                # Test time
-                if hasattr(block_info, 'time'):
-                    print(f"   time: {block_info.time}")
-                else:
-                    print(f"   time: Not available")
-                
-                # Test transactions
-                if hasattr(block_info, 'transactions'):
-                    print(f"   transactions: {len(block_info.transactions)} transactions")
-                    if block_info.transactions:
-                        for i, tx in enumerate(block_info.transactions[:3]):  # Show first 3
-                            print(f"     tx[{i}]: {type(tx)}")
-                            if hasattr(tx, 'txid'):
-                                print(f"       txid: {tx.txid.hex()}")
-                else:
-                    print(f"   transactions: Not available")
-                
-                # Test raw data
-                if hasattr(block_info, 'raw'):
-                    raw_data = block_info.raw()
-                    print(f"   raw data length: {len(raw_data)} bytes")
-                else:
-                    print(f"   raw data: Not available")
-                
-            else:
-                print(f"❌ getblock returned None")
-                
-        except Exception as e:
-            print(f"❌ Error getting block: {e}")
-            import traceback
-            traceback.print_exc()
-        
+        else:
+            print(f"❌ Failed to fetch block {block_number}")
+            print(f"   Response: {result}")
+            
     except Exception as e:
-        print(f"❌ Error in test: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Error fetching block: {e}")
 
 if __name__ == "__main__":
-    test_block_fetching() 
+    print("Testing Block Fetching from Alchemy API")
+    print("=" * 50)
+    test_get_block_with_transactions() 

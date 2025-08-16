@@ -1,187 +1,130 @@
-from flask import Flask, url_for, request, redirect, render_template, flash
-from markupsafe import Markup
-from flask_admin import Admin, expose, AdminIndexView
-from flask_admin.contrib.sqla import ModelView
-from flask_login import LoginManager, UserMixin, login_user, logout_user, current_user, login_required
-from db.models import User, Profile, UserRole  # import your models
-from db.dto import validate_login, LoginDto
-from db.wallet import Account, Transaction, CryptoAddress, Reservation, Swap  # import all wallet models
-from db.connection import session  # adjust as needed
-from decouple import config
+import os
+from flask import Flask, request, jsonify
+from db.connection import session
+from db.models import User, Profile, UserRole
 
 app = Flask(__name__)
-app.secret_key = config('APP_SECRET')  # Needed for Flask-Admin and Flask-Login
 
-# --- Flask-Login setup ---
-login_manager = LoginManager(app)
-login_manager.login_view = 'login_view'
 
-# Use User model for admin authentication (must have is_admin flag)
-class AdminUser(UserMixin):
-    def __init__(self, user):
-        self.id = user.id
-        self.email = user.email
-        self.first_name = user.first_name
-        self.last_name = user.last_name
-        self.is_admin = getattr(user, 'is_admin', True)  # fallback for demo
-    def get_id(self):
-        return str(self.id)
+def serialize_user(u: User):
+    return {
+        "id": u.id,
+        "email": getattr(u, "email", None),
+        "first_name": getattr(u, "first_name", None),
+        "last_name": getattr(u, "last_name", None),
+        "phone_number": getattr(u, "phone_number", None),
+        "role": getattr(u, "role", None).name if hasattr(getattr(u, "role", None), 'name') else getattr(u, "role", None),
+        "blocked": getattr(u, "blocked", None),
+        "deleted": getattr(u, "deleted", None),
+        # Expose user's default currency as 'currency' to the UI
+        "currency": getattr(u, "default_currency", None) or getattr(getattr(u, "profile", None), "currency", None),
+    }
 
-@login_manager.user_loader
-def load_user(user_id):
-    user = session.query(User).filter_by(id=int(user_id)).first()
-    if user:
-        return AdminUser(user)
-    return None
 
-# --- Admin authentication views ---
-@app.route('/admin/login', methods=['GET', 'POST'])
-def login_view():
-    if request.method == 'POST':
-        email = request.form['email']
-        password = request.form['password']
-        # Replace with real password check and admin check
-        data = LoginDto(**request.form)
-        errors = validate_login(data, session)
-        if not errors:
-            user = session.query(User).filter_by(email=email).first()
-            if user and user.role == UserRole.ADMIN:
-                login_user(AdminUser(user))
-                return redirect(url_for('admin.index'))
-            flash('Invalid credentials or not an admin.')
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok"})
+
+
+@app.route('/admin/users', methods=['GET'])
+def admin_list_users():
+    """List users with optional filters and pagination."""
+    q = session.query(User)
+
+    # Filters
+    email = request.args.get('email')
+    role = request.args.get('role')
+    blocked = request.args.get('blocked')
+    deleted = request.args.get('deleted')
+    currency = request.args.get('currency')
+
+    if email:
+        q = q.filter(User.email.ilike(f"%{email}%"))
+    if role:
+        try:
+            # Accept enum name or raw value
+            enum_role = UserRole[role] if role in UserRole.__members__ else role
+            q = q.filter(User.role == enum_role)
+        except Exception:
+            pass
+    if blocked is not None:
+        if blocked.lower() in ('true', '1'):
+            q = q.filter(getattr(User, 'blocked', False) == True)  # noqa: E712
+        elif blocked.lower() in ('false', '0'):
+            q = q.filter(getattr(User, 'blocked', False) == False)  # noqa: E712
+    if deleted is not None:
+        if deleted.lower() in ('true', '1'):
+            q = q.filter(getattr(User, 'deleted', False) == True)  # noqa: E712
+        elif deleted.lower() in ('false', '0'):
+            q = q.filter(getattr(User, 'deleted', False) == False)  # noqa: E712
+    if currency:
+        # Prefer user.default_currency if exists else join profile.currency
+        if hasattr(User, 'default_currency'):
+            q = q.filter(getattr(User, 'default_currency') == currency)
         else:
-            flash("Invalid credentials or not an admin. ")
-    return render_template('login.html')
+            q = q.join(Profile, isouter=True).filter(Profile.currency == currency)
 
-@app.route('/admin/logout')
-def logout_view():
-    logout_user()
-    return redirect(url_for('login_view'))
+    # Pagination
+    try:
+        page = int(request.args.get('page', 1))
+        page_size = int(request.args.get('page_size', 25))
+    except Exception:
+        page, page_size = 1, 25
 
-# --- Protect admin views ---
-class AuthenticatedAdminIndexView(AdminIndexView):
-    @expose('/')
-    @login_required
-    def index(self):
-        return super().index()
+    total = q.count()
+    items = q.order_by(User.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
 
-class AuthenticatedModelView(ModelView):
-    def is_accessible(self):
-        return current_user.is_authenticated and getattr(current_user, 'is_admin', True)
-    def inaccessible_callback(self, name, **kwargs):
-        return redirect(url_for('login_view'))
+    return jsonify({
+        "items": [serialize_user(u) for u in items],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    })
 
-admin = Admin(app, name='Admin', template_mode='bootstrap3', index_view=AuthenticatedAdminIndexView())
 
-# Custom UserAdmin with 'Create Account' link
-class UserAdmin(AuthenticatedModelView):
-    column_list = ('id', 'email', 'create_account')
-    column_formatters = {
-        'create_account': lambda v, c, m, p: Markup(
-            f'<a href="{url_for("account.create_view")}?user_id={m.id}">Create Account</a>'
-        )
-    }
-    column_labels = {'create_account': 'Create Account'}
+@app.route('/admin/users/<int:user_id>', methods=['GET'])
+def admin_get_user(user_id: int):
+    u = session.query(User).filter(User.id == user_id).first()
+    if not u:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify(serialize_user(u))
 
-# Custom AccountAdmin with user_id pre-fill
-class AccountAdmin(AuthenticatedModelView):
-    form_choices = {
-        'account_type': [
-            ('FIAT', 'FIAT'),
-            ('CRYPTO', 'CRYPTO')
-        ]
-    }
-    # Only include 'user' (relationship) in form_columns
-    form_columns = ['user', 'currency', 'account_type', 'account_number', 'label', 'balance', 'locked_amount']
-    # Add a column for user's full name
-    column_list = ('user_full_name', 'user', 'currency', 'account_type', 'account_number', 'label', 'balance', 'locked_amount')
-    column_formatters = {
-        'user_full_name': lambda v, c, m, p: f"{m.user.first_name} {m.user.last_name}" if m.user else ""
-    }
-    column_labels = {'user_full_name': 'User Full Name'}
-    def create_form(self, obj=None):
-        form = super().create_form(obj)
-        user_id = request.args.get('user_id')
-        if user_id and hasattr(form, 'user'):
-            try:
-                user_obj = session.query(User).get(int(user_id))
-                if user_obj:
-                    form.user.data = user_obj
-            except Exception:
-                pass
-        return form
 
-# Transaction admin to list all transactions
-class TransactionAdmin(AuthenticatedModelView):
-    page_size = 50
-    column_list = ('user_full_name', 'account_number', 'amount', 'type', 'status', 'created_at')
-    column_formatters = {
-        'user_full_name': lambda v, c, m, p: f"{m.account.user.first_name} {m.account.user.last_name}" if m.account and m.account.user else "",
-        'account_number': lambda v, c, m, p: m.account.account_number if m.account else ""
-    }
-    column_labels = {
-        'user_full_name': 'User Full Name',
-        'account_number': 'Account Number',
-        'amount': 'Amount',
-        'type': 'Type',
-        'status': 'Status',
-        'created_at': 'Created At'
-    }
+@app.route('/admin/users/<int:user_id>', methods=['PATCH'])
+def admin_patch_user(user_id: int):
+    payload = request.get_json(silent=True) or {}
+    u = session.query(User).filter(User.id == user_id).first()
+    if not u:
+        return jsonify({"error": "User not found"}), 404
 
-# CryptoAddress admin
-class CryptoAddressAdmin(AuthenticatedModelView):
-    page_size = 50
-    column_list = ('account_number', 'currency_code', 'address', 'label', 'is_active', 'memo', 'address_type', 'version')
-    column_formatters = {
-        'account_number': lambda v, c, m, p: m.account.account_number if m.account else ""
-    }
-    column_labels = {
-        'account_number': 'Account Number',
-        'currency_code': 'Currency',
-        'address': 'Address',
-        'label': 'Label',
-        'is_active': 'Active',
-        'memo': 'Memo',
-        'address_type': 'Address Type',
-        'version': 'Version'
-    }
+    # Allowed updatable fields (apply if present and attribute exists)
+    updatable_direct = ["role", "blocked", "deleted", "default_currency"]
+    # Map alias 'currency' -> 'default_currency' if provided
+    if 'currency' in payload and 'default_currency' not in payload:
+        payload['default_currency'] = payload['currency']
 
-# Reservation admin
-class ReservationAdmin(AuthenticatedModelView):
-    page_size = 50
-    column_list = ('user_id', 'reference', 'amount', 'type', 'status')
-    column_labels = {
-        'user_id': 'User ID',
-        'reference': 'Reference',
-        'amount': 'Amount',
-        'type': 'Type',
-        'status': 'Status'
-    }
+    for field in updatable_direct:
+        if field in payload and hasattr(u, field):
+            val = payload[field]
+            if field == "role":
+                try:
+                    # Accept role as string (e.g., 'ADMIN'/'USER') or enum
+                    if isinstance(val, str):
+                        val = UserRole[val] if val in UserRole.__members__ else val
+                except Exception:
+                    pass
+            setattr(u, field, val)
 
-# Swap admin
-class SwapAdmin(AuthenticatedModelView):
-    page_size = 50
-    column_list = ('user_id', 'from_account_id', 'to_account_id', 'from_amount', 'to_amount', 'rate', 'fee_amount', 'status', 'transaction_id')
-    column_labels = {
-        'user_id': 'User ID',
-        'from_account_id': 'From Account',
-        'to_account_id': 'To Account',
-        'from_amount': 'From Amount',
-        'to_amount': 'To Amount',
-        'rate': 'Rate',
-        'fee_amount': 'Fee',
-        'status': 'Status',
-        'transaction_id': 'Transaction ID'
-    }
+    # If default_currency not on User, fall back to Profile.currency
+    if 'default_currency' in payload and not hasattr(u, 'default_currency'):
+        prof = session.query(Profile).filter(Profile.user_id == u.id).first()
+        if prof:
+            prof.currency = payload['default_currency']
 
-admin.add_view(UserAdmin(User, session))
-admin.add_view(AuthenticatedModelView(Profile, session))
-admin.add_view(AccountAdmin(Account, session))
-admin.add_view(TransactionAdmin(Transaction, session))
-admin.add_view(CryptoAddressAdmin(CryptoAddress, session))
-admin.add_view(ReservationAdmin(Reservation, session))
-admin.add_view(SwapAdmin(Swap, session))
-# Add more models as needed
+    session.commit()
+    return jsonify(serialize_user(u))
+
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=3000, debug=True)
+    port = int(os.getenv('PORT', '3000'))
+    app.run(host='0.0.0.0', port=port, debug=True)

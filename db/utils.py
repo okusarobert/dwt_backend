@@ -107,23 +107,28 @@ def decode_token(token):
         return {"error": "Invalid token"}
 
 # Middleware decorator
-
-
 def token_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        auth_header = request.headers.get("Authorization")
-        if not auth_header:
+        token = None
+        
+        # First try to get token from HTTP-only cookie
+        if request.cookies.get('auth-token'):
+            token = request.cookies.get('auth-token')
+            current_app.logger.info("Token found in cookie")
+        else:
+            # Fallback to Authorization header for backward compatibility
+            auth_header = request.headers.get("Authorization")
+            if auth_header:
+                parts = auth_header.split(" ")
+                if len(parts) == 2 and parts[0].lower() == "bearer":
+                    token = parts[1]
+                    current_app.logger.info("Token found in Authorization header")
+        
+        if not token:
             current_app.logger.info("Missing token")
             return jsonify({"msg": "Missing token"}), 401
 
-        # Extract the token
-        parts = auth_header.split(" ")
-        if len(parts) != 2 or parts[0].lower() != "bearer":
-            current_app.logger.info("Invalid token format")
-            return jsonify({"msg": "Invalid token format"}), 401
-
-        token = parts[1]
         decoded = decode_token(token)
 
         if "error" in decoded:

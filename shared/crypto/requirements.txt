@@ -1,0 +1,18 @@
+# Crypto Price Utilities Requirements
+
+# Core dependencies
+requests>=2.28.0
+redis>=4.5.0
+python-decouple>=3.8
+
+# Optional: For better Redis performance
+hiredis>=2.0.0
+
+# Optional: For async Redis support (if needed later)
+# aioredis>=2.0.0
+
+# Optional: For better JSON handling
+# ujson>=5.7.0
+
+# Optional: For rate limiting improvements
+# tenacity>=8.2.0

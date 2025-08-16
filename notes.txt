@@ -57,7 +57,8 @@ curl -X POST http://localhost:5005/scan_history/mt4Vd5HFw2C8BZDbEGDxdhAGYYdsJCaz
   -d '{"blocks_back": 15000}'
 
 
-  Coins with webhook -> solana
+  Coins with webhook 
+  -> solana
   -> world chain
   -> ethereum
   -> bitcoin
@@ -71,4 +72,52 @@ curl -X POST http://localhost:5005/scan_history/mt4Vd5HFw2C8BZDbEGDxdhAGYYdsJCaz
   - optimism
   - base
   - avalanche
-  
+
+
+
+python ./db/migrate_crypto_amounts.py migrate
+
+python ./db/migrate_crypto_amounts.py verify  
+
+python credit_crypto_account.py --amount 0.05 --currency ETH --credit 418
+
+{"to_address": "0x153fEEe2FD50018f2d9DD643174F7C244aA77C95", "gas_limit": 21000, "estimated_cost_eth": 0.0, "transaction_params": {"from": "0x54c8F97598Ea64C6cC48832AA8EA712d24bb481f", "to": "0x153fEEe2FD50018f2d9DD643174F7C244aA77C95", "value": "0x2386f26fc10000", "gas": "0x5208", "gasPrice": "0x0", "nonce": "0x0"}}
+
+{"from_address": "0x54c8f97598ea64c6cc48832aa8ea712d24bb481f", "to_address": "0x153feee2fd50018f2d9dd643174f7c244aa77c95", "block_number": 0, "gas_price": 5392881, "gas_used": 21000, "timestamp": 0, "value_wei": "1000000000000000", "amount_eth": "0.001"}
+
+
+{"from_address": "0x54c8f97598ea64c6cc48832aa8ea712d24bb481f", "to_address": "0x153feee2fd50018f2d9dd643174f7c244aa77c95", "block_number": 0, "gas_price": 1000028, "gas_used": 21000, "timestamp": 0, "value_wei": "1000000000000000", "amount_eth": "0.001"}
+0x153feee2fd50018f2d9dd643174f7c244aa77c95
+0x54c8f97598ea64c6cc48832aa8ea712d24bb481f
+
+
+{"to_address": "0x153fEEe2FD50018f2d9DD643174F7C244aA77C95", "gas_limit": 21000, "estimated_cost_eth": 4.832524809e-06, "transaction_params": {"from": "0x54c8F97598Ea64C6cC48832AA8EA712d24bb481f", "to": "0x153fEEe2FD50018f2d9DD643174F7C244aA77C95", "value": "0x38d7ea4c68000", "gas": "0x5208", "gasPrice": "0xdb75b25", "nonce": "0x15"}, "transaction_hash": "0x5def6a7c613c59976775e93c574fbe2d7ef8b41b254b46049491292fb44cfc3e", "from_address": "0x54c8F97598Ea64C6cC48832AA8EA712d24bb481f"}
+
+{"to_address": "0x153fEEe2FD50018f2d9DD643174F7C244aA77C95", "gas_limit": 21000, "estimated_cost_eth": 2.1000252e-08, "transaction_params": {"from": "0x54c8F97598Ea64C6cC48832AA8EA712d24bb481f", "to": "0x153fEEe2FD50018f2d9DD643174F7C244aA77C95", "value": "0x38d7ea4c68000", "gas": "0x5208", "gasPrice": "0xf424c", "nonce": "0x14"}, "transaction_hash": "0x150914c36f637b71bb9d9e86824180f29637d7e66dc0054d056d8532e3c887c4", "from_address": "0x54c8F97598Ea64C6cC48832AA8EA712d24bb481f"}
+{"to_address": "0x153fEEe2FD50018f2d9DD643174F7C244aA77C95", "gas_limit": 21000, "estimated_cost_eth": 4.832524809e-06, "transaction_params": {"from": "0x54c8F97598Ea64C6cC48832AA8EA712d24bb481f", "to": "0x153fEEe2FD50018f2d9DD643174F7C244aA77C95", "value": "0x38d7ea4c68000", "gas": "0x5208", "gasPrice": "0xdb75b25", "nonce": "0x15"}, "transaction_hash": "0x5def6a7c613c59976775e93c574fbe2d7ef8b41b254b46049491292fb44cfc3e", "from_address": "0x54c8F97598Ea64C6cC48832AA8EA712d24bb481f"}
+
+/v1/accounts/TB9Waxo7BGD3FiJ7SHL4qPpMYfZbihZ5xj/transactions?limit=20&only_to=true&only_confirmed=true
+
+
+wallet-1     | {"timestamp": "2025-08-10T10:28:43.089075", "level": "INFO", "message": "Sending ERC20 transfer: 1.0 0x9c529c5e89dddf44b0fad809e7f979b611067354 to 0xa0b1b556a0cf47deb1dbc7cacd8ead41982953a7 on 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", "module": "eth", "function": "send_erc20_transfer", "line": 576}
+
+
+{"to_address": "0xa0b1b556a0cf47deb1dbc7cacd8ead41982953a7", "gas_limit": 21000, "estimated_cost_eth": 0, "transaction_params": {}, "transaction_hash": "0x4b477586d226becf921462b21b779e205d2ad3577507351eaadd31e53d81b01f", "from_address": "0x9c529c5e89dddf44b0fad809e7f979b611067354", "block_number": 0, "reservation_reference": "eth_withdrawal_1754822205447_rec20_withdraw_1234598", "token_contract": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", "token_symbol": "USDC", "block_number":0}
+
+kafka-topics --bootstrap-server kafka:9092 --list
+kafka-consumer-groups --bootstrap-server kafka:9092 --group wallet-merged-consumer --reset-offsets --to-earliest --execute
+
+kafka-consumer-groups --bootstrap-server kafka:9092 --group wallet-merged-consumer --reset-offsets --to-latest --execute
+
+
+curl -X POST http://localhost:3030/api/v1/wallet/transfer \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyMywiZW1haWwiOiJva3VzYXJvYmVydCsyQGdtYWlsLmNvbSJ9.t2AEOLVbFv_HFZb5UV-2hSNVYlWd4bSHLh-7Ld71G94" \
+  -d '{
+    "amount": 100.00,
+    "currency": "UGX",
+    "to_email": "okusarobert+3@gmail.com",
+    "description": "Test transfer between users"
+  }' | jq '.'
+
+  docker-compose exec admin pytest tests/test_accounting.py

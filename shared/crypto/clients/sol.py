@@ -19,10 +19,10 @@ import base64
 # Solana SDK imports
 try:
     from solana.rpc.api import Client
-    from solana.keypair import Keypair
-    from solana.publickey import PublicKey
-    from solana.transaction import Transaction
-    from solana.system_program import TransferParams, transfer
+    from solders.keypair import Keypair
+    from solders.pubkey import Pubkey as PublicKey
+    from solders.transaction import Transaction
+    from solders.system_program import TransferParams, transfer
     from solana.rpc.commitment import Commitment
     from solana.rpc.types import TxOpts
     import base58
@@ -72,7 +72,7 @@ class SolanaConfig:
 class SOLWallet:
     account_id = None
 
-    def __init__(self, user_id: int, config: SolanaConfig, session: Session, logger: logging.Logger = None):
+    def __init__(self, user_id: int, sol_config: SolanaConfig, session: Session, logger: logging.Logger = None):
         self.user_id = user_id
         self.label = "SOL Wallet"
         self.account_number = generate_unique_account_number(session=session, length=10)
@@ -80,7 +80,7 @@ class SOLWallet:
         self.logger = logger or setup_logging()
         self.symbol = "SOL"
         self.app_secret = config('APP_SECRET', default='your-app-secret-key')
-        self.config = config
+        self.config = sol_config
         self.session_request = requests.Session()
         self.session_request.headers.update({
             'Content-Type': 'application/json',
@@ -89,7 +89,7 @@ class SOLWallet:
         
         # Initialize Solana client if SDK is available
         if SOLANA_AVAILABLE:
-            if config.network == "mainnet":
+            if sol_config.network == "mainnet":
                 self.solana_client = Client("https://api.mainnet-beta.solana.com")
             else:
                 self.solana_client = Client("https://api.devnet.solana.com")
@@ -144,6 +144,323 @@ class SOLWallet:
             self.logger.error(traceback.format_exc())
             raise  # Re-raise the exception so the wallet service can handle it
 
+    def register_all_addresses_with_webhook(self) -> Dict[str, Any]:
+        """Register all existing addresses for this wallet with Alchemy webhook"""
+        try:
+            addresses = self.get_wallet_addresses()
+            registered_count = 0
+            failed_count = 0
+            results = []
+            
+            for addr_info in addresses:
+                address = addr_info["address"]
+                success = self.register_address_with_webhook(address)
+                
+                if success:
+                    registered_count += 1
+                    results.append({"address": address, "status": "registered"})
+                else:
+                    failed_count += 1
+                    results.append({"address": address, "status": "failed"})
+            
+            return {
+                "total_addresses": len(addresses),
+                "registered_count": registered_count,
+                "failed_count": failed_count,
+                "results": results
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error registering all addresses with webhook: {e}")
+            return {
+                "total_addresses": 0,
+                "registered_count": 0,
+                "failed_count": 0,
+                "error": str(e)
+            }
+
+    def register_address_with_webhook(self, address: str) -> bool:
+        """Register a Solana address with existing Alchemy webhook or create new one"""
+        try:
+            # Get Alchemy Auth Key for dashboard API
+            alchemy_auth_key = config('ALCHEMY_AUTH_KEY', default=None)
+            if not alchemy_auth_key:
+                self.logger.warning("ALCHEMY_AUTH_KEY not configured, skipping webhook registration")
+                return False
+            
+            # Prepare the webhook URL
+            webhook_url = config('WEBHOOK_BASE_URL', default='http://localhost:3030')
+            webhook_endpoint = f"{webhook_url}/api/v1/wallet/sol/callbacks/address-webhook"
+            
+            # Use the Alchemy dashboard API
+            dashboard_url = "https://dashboard.alchemy.com/api"
+            
+            # First, check if a webhook already exists
+            existing_webhooks = self._get_existing_webhooks_dashboard(dashboard_url, alchemy_auth_key)
+            
+            if existing_webhooks:
+                # Use the first existing webhook and add the address to it
+                webhook_id = existing_webhooks[0]['id']
+                return self._add_address_to_webhook_dashboard(dashboard_url, webhook_id, address, alchemy_auth_key)
+            else:
+                # Create a new webhook with this address
+                return self._create_webhook_with_address_dashboard(dashboard_url, webhook_endpoint, address, alchemy_auth_key)
+                
+        except Exception as e:
+            self.logger.error(f"Error registering address {address} with webhook: {e}")
+            return False
+
+    def _get_existing_webhooks_dashboard(self, dashboard_url: str, auth_key: str) -> list:
+        """Get existing webhooks from Alchemy dashboard API"""
+        try:
+            headers = {
+                'X-Alchemy-Token': auth_key
+            }
+            
+            response = requests.get(
+                f"{dashboard_url}/team-webhooks",
+                headers=headers,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                # Handle the response format: {"data": [...]}
+                webhooks = result.get('data', []) if isinstance(result, dict) else result
+                return webhooks if isinstance(webhooks, list) else []
+            else:
+                self.logger.warning(f"Failed to get existing webhooks: {response.status_code} - {response.text}")
+                return []
+                
+        except Exception as e:
+            self.logger.error(f"Error getting existing webhooks: {e}")
+            return []
+
+    def _create_webhook_with_address_dashboard(self, dashboard_url: str, webhook_endpoint: str, address: str, auth_key: str) -> bool:
+        """Create a new webhook with the specified address using dashboard API"""
+        try:
+            payload = {
+                "network": "SOL_MAINNET" if self.config.network == "mainnet" else "SOL_DEVNET",
+                "webhook_type": "ADDRESS_ACTIVITY",
+                "webhook_url": webhook_endpoint,
+                "addresses": [address]
+            }
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'X-Alchemy-Token': auth_key
+            }
+            
+            self.logger.info(f"Attempting to create webhook with payload: {payload}")
+            
+            response = requests.post(
+                f"{dashboard_url}/create-webhook",
+                json=payload,
+                headers=headers,
+                timeout=30
+            )
+            
+            self.logger.info(f"Webhook creation response: {response.status_code} - {response.text}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                self.logger.info(f"Successfully created webhook with address {address}")
+                self.logger.info(f"Webhook ID: {result.get('id', 'N/A')}")
+                self.logger.info(f"Signing Key: {result.get('signing_key', 'N/A')}")
+                return True
+            else:
+                self.logger.error(f"Failed to create webhook for {address}: {response.status_code} - {response.text}")
+                self.logger.warning("Webhook creation failed. This might be due to:")
+                self.logger.warning("1. Invalid API endpoint")
+                self.logger.warning("2. Incorrect authentication")
+                self.logger.warning("3. Missing required parameters")
+                self.logger.warning("4. Network restrictions")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error creating webhook with address {address}: {e}")
+            return False
+
+    def _add_address_to_webhook_dashboard(self, dashboard_url: str, webhook_id: str, address: str, auth_key: str) -> bool:
+        """Add an address to an existing webhook using dashboard API"""
+        try:
+            payload = {
+                "webhook_id": webhook_id,
+                "addresses_to_add": [address],
+                "addresses_to_remove": []
+            }
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'X-Alchemy-Token': auth_key
+            }
+            
+            self.logger.info(f"Adding address {address} to webhook {webhook_id}")
+            
+            response = requests.patch(
+                f"{dashboard_url}/update-webhook-addresses",
+                json=payload,
+                headers=headers,
+                timeout=30
+            )
+            
+            self.logger.info(f"Webhook update response: {response.status_code} - {response.text}")
+            
+            if response.status_code == 200:
+                self.logger.info(f"Successfully added address {address} to webhook {webhook_id}")
+                return True
+            else:
+                self.logger.error(f"Failed to add address {address} to webhook {webhook_id}: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error adding address {address} to webhook {webhook_id}: {e}")
+            return False
+
+    def _remove_address_from_webhook_dashboard(self, dashboard_url: str, webhook_id: str, address: str, auth_key: str) -> bool:
+        """Remove an address from an existing webhook using dashboard API"""
+        try:
+            payload = {
+                "webhook_id": webhook_id,
+                "addresses_to_add": [],
+                "addresses_to_remove": [address]
+            }
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'X-Alchemy-Token': auth_key
+            }
+            
+            self.logger.info(f"Removing address {address} from webhook {webhook_id}")
+            
+            response = requests.patch(
+                f"{dashboard_url}/update-webhook-addresses",
+                json=payload,
+                headers=headers,
+                timeout=30
+            )
+            
+            self.logger.info(f"Webhook update response: {response.status_code} - {response.text}")
+            
+            if response.status_code == 200:
+                self.logger.info(f"Successfully removed address {address} from webhook {webhook_id}")
+                return True
+            else:
+                self.logger.error(f"Failed to remove address {address} from webhook {webhook_id}: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error removing address {address} from webhook {webhook_id}: {e}")
+            return False
+
+    def delete_webhook(self, webhook_id: str) -> bool:
+        """Delete a webhook using the Alchemy dashboard API"""
+        try:
+            # Get Alchemy Auth Key for dashboard API
+            alchemy_auth_key = config('ALCHEMY_AUTH_KEY', default=None)
+            if not alchemy_auth_key:
+                self.logger.warning("ALCHEMY_AUTH_KEY not configured, skipping webhook deletion")
+                return False
+            
+            # Use the Alchemy dashboard API
+            dashboard_url = "https://dashboard.alchemy.com/api"
+            
+            headers = {
+                'X-Alchemy-Token': alchemy_auth_key
+            }
+            
+            params = {
+                'webhook_id': webhook_id
+            }
+            
+            self.logger.info(f"Deleting webhook {webhook_id}")
+            
+            response = requests.delete(
+                f"{dashboard_url}/delete-webhook",
+                headers=headers,
+                params=params,
+                timeout=30
+            )
+            
+            self.logger.info(f"Webhook deletion response: {response.status_code} - {response.text}")
+            
+            if response.status_code == 200:
+                self.logger.info(f"Successfully deleted webhook {webhook_id}")
+                return True
+            else:
+                self.logger.error(f"Failed to delete webhook {webhook_id}: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error deleting webhook {webhook_id}: {e}")
+            return False
+
+    def list_webhooks(self) -> list:
+        """List all webhooks using the Alchemy dashboard API"""
+        try:
+            # Get Alchemy Auth Key for dashboard API
+            alchemy_auth_key = config('ALCHEMY_AUTH_KEY', default=None)
+            if not alchemy_auth_key:
+                self.logger.warning("ALCHEMY_AUTH_KEY not configured, skipping webhook listing")
+                return []
+            
+            # Use the Alchemy dashboard API
+            dashboard_url = "https://dashboard.alchemy.com/api"
+            
+            headers = {
+                'X-Alchemy-Token': alchemy_auth_key
+            }
+            
+            self.logger.info("Listing webhooks")
+            
+            response = requests.get(
+                f"{dashboard_url}/team-webhooks",
+                headers=headers,
+                timeout=30
+            )
+            
+            self.logger.info(f"Webhook listing response: {response.status_code} - {response.text}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                webhooks = result.get('data', []) if isinstance(result, dict) else result
+                self.logger.info(f"Found {len(webhooks)} webhooks")
+                return webhooks
+            else:
+                self.logger.error(f"Failed to list webhooks: {response.status_code} - {response.text}")
+                return []
+                
+        except Exception as e:
+            self.logger.error(f"Error listing webhooks: {e}")
+            return []
+
+    def unregister_address_from_webhook(self, address: str) -> bool:
+        """Remove a Solana address from existing Alchemy webhook"""
+        try:
+            # Get Alchemy Auth Key for dashboard API
+            alchemy_auth_key = config('ALCHEMY_AUTH_KEY', default=None)
+            if not alchemy_auth_key:
+                self.logger.warning("ALCHEMY_AUTH_KEY not configured, skipping webhook unregistration")
+                return False
+            
+            # Use the Alchemy dashboard API
+            dashboard_url = "https://dashboard.alchemy.com/api"
+            
+            # Get existing webhooks
+            existing_webhooks = self._get_existing_webhooks_dashboard(dashboard_url, alchemy_auth_key)
+            
+            if not existing_webhooks:
+                self.logger.warning("No existing webhooks found")
+                return False
+            
+            # Remove address from the first webhook (assuming one webhook per network)
+            webhook_id = existing_webhooks[0]['id']
+            return self._remove_address_from_webhook_dashboard(dashboard_url, webhook_id, address, alchemy_auth_key)
+                
+        except Exception as e:
+            self.logger.error(f"Error unregistering address {address} from webhook: {e}")
+            return False
+
     def create_address(self):
         """Create a new SOL address for the wallet with uniqueness guarantees."""
         try:
@@ -154,12 +471,19 @@ class SOLWallet:
                 new_address = self.ensure_address_uniqueness()
                 if new_address:
                     self.logger.info(f"Created unique user address: {new_address['address']}")
+                    
+                    # Register the address with Alchemy webhook for monitoring
+                    webhook_registered = self.register_address_with_webhook(new_address['address'])
+                    if webhook_registered:
+                        self.logger.info(f"Address {new_address['address']} registered with webhook for monitoring")
+                    else:
+                        self.logger.warning(f"Failed to register address {new_address['address']} with webhook")
                 else:
                     self.logger.error("Failed to create unique address")
                     raise Exception("Failed to create unique Solana address")
             else:
-                # Fallback: create a placeholder address
-                placeholder_address = "11111111111111111111111111111111"  # System Program
+                # Fallback: create a placeholder address (valid Solana address format)
+                placeholder_address = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"  # Valid Solana address
                 self.logger.warning(f"Created placeholder address: {placeholder_address} (Solana SDK not available)")
                 
         except Exception as e:
@@ -396,16 +720,20 @@ class SOLWallet:
         try:
             if SOLANA_AVAILABLE:
                 # Use Solana SDK to validate
-                PublicKey(address)
+                # First decode base58, then create PublicKey
+                decoded_bytes = base58.b58decode(address)
+                if len(decoded_bytes) != 32:
+                    return False
+                PublicKey(decoded_bytes)
                 return True
             else:
                 # Basic validation: check length and base58 format
                 if len(address) != 44:  # Solana addresses are 44 characters
                     return False
-                # Check if it's valid base58
+                # Check if it's valid base58 and 32 bytes
                 try:
-                    base58.b58decode(address)
-                    return True
+                    decoded_bytes = base58.b58decode(address)
+                    return len(decoded_bytes) == 32
                 except:
                     return False
         except:
@@ -526,8 +854,9 @@ class SOLWallet:
             
             # Generate a new Solana keypair
             keypair = Keypair()
-            public_key = keypair.public_key
-            private_key = base58.b58encode(keypair.secret_key).decode()
+            public_key = keypair.pubkey()
+            # Store the full 64-byte keypair, not just the 32-byte secret
+            private_key = base58.b58encode(bytes(keypair)).decode()
             
             # Check for address collision (extremely unlikely but good practice)
             if self._address_exists(str(public_key)):
@@ -712,4 +1041,111 @@ class SOLWallet:
             
         except Exception as e:
             self.logger.error(f"Error ensuring address uniqueness: {e}")
-            return None 
+            return None
+
+    def send_transaction(self, to_address: str, amount: float, priority_fee: int = 5000) -> Dict[str, Any]:
+        """Send SOL to an external address"""
+        try:
+            if not SOLANA_AVAILABLE:
+                raise Exception("Solana SDK not available")
+            
+            # Validate Solana address
+            if not self.validate_address(to_address):
+                raise Exception(f"Invalid Solana address: {to_address}")
+            
+            # Get the user's SOL account
+            sol_account = self.session.query(Account).filter_by(
+                user_id=self.user_id,
+                currency="SOL",
+                account_type=AccountType.CRYPTO
+            ).first()
+            
+            if not sol_account:
+                raise Exception("No SOL account found for user")
+            
+            # Get the crypto address for this account
+            crypto_address = self.session.query(CryptoAddress).filter_by(
+                account_id=sol_account.id,
+                currency_code="SOL",
+                is_active=True
+            ).first()
+            
+            if not crypto_address:
+                raise Exception("No active SOL address found for user")
+            
+            # Decrypt the private key
+            private_key_base58 = self.decrypt_private_key(crypto_address.private_key)
+            
+            # Convert amount to lamports (smallest unit)
+            amount_lamports = int(amount * 1_000_000_000)  # 1 SOL = 1,000,000,000 lamports
+            
+            # Create keypair from private key
+            private_key_bytes = base58.b58decode(private_key_base58)
+            
+            # Handle both old format (32-byte secret) and new format (64-byte keypair)
+            if len(private_key_bytes) == 32:
+                # Old format: 32-byte secret, create keypair from seed
+                keypair = Keypair.from_seed(private_key_bytes)
+            elif len(private_key_bytes) == 64:
+                # New format: 64-byte keypair
+                keypair = Keypair.from_bytes(private_key_bytes)
+            else:
+                raise Exception(f"Invalid private key format. Expected 32 or 64 bytes, got {len(private_key_bytes)}")
+            
+            # Get recent blockhash
+            recent_blockhash = self.solana_client.get_latest_blockhash()
+            if not recent_blockhash.value:
+                raise Exception("Failed to get recent blockhash")
+            
+            # Create transfer instruction
+            transfer_instruction = transfer(
+                TransferParams(
+                    from_pubkey=keypair.pubkey(),
+                    to_pubkey=PublicKey(base58.b58decode(to_address)),
+                    lamports=amount_lamports
+                )
+            )
+            
+            # Create transaction with new API
+            from solders.hash import Hash
+            transaction = Transaction.new_signed_with_payer(
+                [transfer_instruction],
+                keypair.pubkey(),
+                [keypair],
+                recent_blockhash.value.blockhash
+            )
+            
+            # Send transaction
+            tx_opts = TxOpts(skip_preflight=False, preflight_commitment=Commitment("confirmed"))
+            result = self.solana_client.send_transaction(transaction, opts=tx_opts)
+            
+            if result.value:
+                signature = str(result.value)  # Convert Signature object to string
+                
+                # Get transaction details
+                tx_info = {
+                    "transaction_hash": signature,
+                    "from_address": str(keypair.pubkey()),
+                    "to_address": to_address,
+                    "amount_sol": amount,
+                    "amount_lamports": amount_lamports,
+                    "estimated_cost_sol": 0.000005,  # Typical Solana transaction fee
+                    "transaction_params": {
+                        "recent_blockhash": str(recent_blockhash.value.blockhash),
+                        "priority_fee": priority_fee
+                    }
+                }
+                
+                self.logger.info(f"✅ SOL transaction sent successfully")
+                self.logger.info(f"   From: {tx_info['from_address']}")
+                self.logger.info(f"   To: {tx_info['to_address']}")
+                self.logger.info(f"   Amount: {amount} SOL ({amount_lamports} lamports)")
+                self.logger.info(f"   Signature: {signature}")
+                
+                return tx_info
+            else:
+                raise Exception("Failed to send transaction")
+                
+        except Exception as e:
+            self.logger.error(f"❌ Error sending SOL transaction: {e}")
+            raise 

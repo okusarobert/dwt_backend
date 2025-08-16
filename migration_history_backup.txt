@@ -1,0 +1,22 @@
+add_trading_models -> c8d25c64b432 (head), add_trade_id_column_direct
+3d91640ec9e0 -> add_trading_models, add trading models
+23e791c49f3a, add_reference_id_unique_constraint -> 3d91640ec9e0 (mergepoint), merge heads
+add_ledger_portfolio_models, d86094e47237 -> 23e791c49f3a (mergepoint), merge ledger portfolio models with existing head
+3c622e3a660d -> add_ledger_portfolio_models, Add ledger and portfolio models
+change_smallest_unit_to_numeric, add_unique_constraint_transactions -> d86094e47237 (mergepoint), merge heads
+fix_amount_bigint -> change_smallest_unit_to_numeric, Widen smallest-unit columns to NUMERIC(78, 0)
+tx_amount_smallest_unit -> fix_amount_bigint, Fix amount_smallest_unit to BigInteger
+fix_tx_ref_length -> tx_amount_smallest_unit, Modify transactions amount field to store smallest units
+fix_ref_length -> fix_tx_ref_length, Fix transactions reference_id field length
+8446892b2c07 -> fix_ref_length, Fix reservations reference field length
+60cafc119eef, add_crypto_smallest_unit_support -> 8446892b2c07 (mergepoint), merge heads
+e2f84217a6be -> 60cafc119eef, added private key
+3c622e3a660d -> e2f84217a6be, add_webhook_id_to_crypto_addresses
+add_unique_constraint_transactions -> add_reference_id_unique_constraint, Add unique constraint on reference_id for transfer idempotency
+f0a7dbda0a09 -> 3c622e3a660d (branchpoint), increase_currency_column_size
+ad43b406e01b -> f0a7dbda0a09, added admin models
+6a38627ad653 -> ad43b406e01b, Added currency and removed currency_id from accounts
+1d661194d41e -> 6a38627ad653, Added currency code
+1d661194d41e -> add_unique_constraint_transactions (branchpoint), Add unique constraint to prevent duplicate transactions
+<base> -> 1d661194d41e (branchpoint), Add custodial wallet, currency, swap, and crypto address models
+<base> -> add_crypto_smallest_unit_support, Add crypto smallest unit support

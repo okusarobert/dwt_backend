@@ -1,0 +1,39 @@
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt* ./
+RUN pip install --no-cache-dir -r requirements.txt || echo "No requirements.txt found"
+
+# Install additional dependencies for testing
+RUN pip install --no-cache-dir \
+    pytest \
+    pytest-asyncio \
+    python-decouple \
+    sqlalchemy \
+    psycopg2-binary \
+    flask
+
+# Copy the entire project
+COPY . .
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Set environment variables for testing
+ENV DATABASE_URL=postgresql://test:test@localhost:5432/test_db
+ENV ALCHEMY_API_KEY=test_key
+ENV ALCHEMY_WEBHOOK_KEY=test_webhook_key
+ENV ALCHEMY_WEBHOOK_ID=test_webhook_id
+ENV VERIFY_ALCHEMY_SIGNATURE=false
+ENV BYPASS_SIGNATURE_VERIFICATION=true
+
+# Run the Solana webhook unified system test
+CMD ["python", "test_solana_webhook_unified.py"]

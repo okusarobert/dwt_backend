@@ -8,7 +8,7 @@ COPY ./shared /app/shared
 # COPY tests /app/tests
 COPY requirements.txt alembic.ini /app/
 
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install  -r /app/requirements.txt
 RUN pip install pytest pytest-flask gunicorn flasgger
 
 RUN apt-get update && apt-get install -y netcat-traditional && rm -rf /var/lib/apt/lists/*

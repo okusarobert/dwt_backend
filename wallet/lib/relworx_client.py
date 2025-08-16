@@ -69,6 +69,7 @@ class RelworxApiClient:
             "description": description
         }
         res = requests.post(url, headers=self.headers, json=data)
+        print(f"[Wallet] Relworx request payment response: {res.json()}")
         res.raise_for_status()
         return res.json()
 

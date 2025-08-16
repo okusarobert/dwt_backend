@@ -12,10 +12,11 @@ from db.utils import generate_unique_account_number
 from shared.logger import setup_logging
 from db.wallet import Account, AccountType, CryptoAddress
 from sqlalchemy.orm import Session
-from decouple import config
+from decouple import config as env_config
 from ..HD import TRX  # Tron uses TRX class
 from cryptography.fernet import Fernet
 import base64
+import binascii
 
 
 class TronConfig(BaseModel):
@@ -54,21 +55,39 @@ class TronWalletConfig:
 class TronWallet:
     account_id = None
 
-    def __init__(self, user_id: int, config: TronWalletConfig, session: Session, logger: logging.Logger = None):
+    def __init__(self, user_id: int, tron_config: TronWalletConfig, session: Session, logger: logging.Logger = None):
         self.user_id = user_id
         self.label = "Tron Wallet"
         self.account_number = generate_unique_account_number(session=session, length=10)
         self.session = session
         self.logger = logger or setup_logging()
         self.symbol = "TRX"
-        self.app_secret = config('APP_SECRET', default='your-app-secret-key')
-        self.tron_config = config
+        self.app_secret = env_config('APP_SECRET', default='your-app-secret-key')
+        self.tron_config = tron_config
         self.session_request = requests.Session()
         self.session_request.headers.update({
             'Content-Type': 'application/json',
             'User-Agent': 'TronWallet/1.0',
-            'TRON-PRO-API-KEY': config.api_key
+            'TRON-PRO-API-KEY': tron_config.api_key
         })
+
+    # ===== Address helpers =====
+
+    @staticmethod
+    def _to_base58_address(maybe_hex: str) -> str:
+        """Convert 41-prefixed hex TRON address to base58check using tronpy.keys."""
+        try:
+            if not maybe_hex:
+                return maybe_hex
+            if maybe_hex.startswith('T'):
+                return maybe_hex
+            hex_str = maybe_hex.lower().replace('0x', '')
+            if not hex_str.startswith('41'):
+                return maybe_hex
+            from tronpy import keys as tron_keys
+            return tron_keys.to_base58check_address(bytes.fromhex(hex_str))
+        except Exception:
+            return maybe_hex
         
     def encrypt_private_key(self, private_key: str) -> str:
         """Encrypt private key using APP_SECRET."""
@@ -187,22 +206,254 @@ class TronWallet:
         return None
 
     def get_transaction_info(self, tx_id: str) -> Optional[Dict]:
-        """Get transaction information"""
-        result = self.make_request(f"/v1/transactions/{tx_id}")
-        return result.get("data", [{}])[0] if result and "data" in result else None
+        """Get transaction info (prefer solidity API for confirmed data with blockNumber)."""
+        # Try solidity endpoint first (GET info with blockNumber once confirmed)
+        info = self.make_request("/walletsolidity/gettransactioninfobyid", method="POST", data={"value": tx_id})
+        if info and isinstance(info, dict) and (info.get("id") or info.get("blockNumber") or info.get("receipt")):
+            return info
+        # Fallback to full node
+        info = self.make_request("/wallet/gettransactioninfobyid", method="POST", data={"value": tx_id})
+        if info and isinstance(info, dict):
+            return info
+        # As a last resort, try TronGrid v1 (may not always be enabled for all resources)
+        grid = self.make_request(f"/v1/transactions/{tx_id}", method="GET")
+        if grid and isinstance(grid, dict):
+            if grid.get("data"):
+                return grid["data"][0]
+            return grid
+        return None
 
     def get_transactions_by_address(self, address: str, limit: int = 20) -> Optional[List[Dict]]:
-        """Get transactions for an address"""
-        result = self.make_request(f"/v1/accounts/{address}/transactions?limit={limit}")
-        return result.get("data", []) if result and "data" in result else []
+        """
+        Get transactions for an address and normalize entries to a unified shape that our
+        monitor can consume easily.
+
+        Input payload example (TronGrid v1):
+        {"data": [ {"txID": "...", "raw_data": {"contract":[{"parameter":{"value":{"owner_address":"41...","to_address":"41...","amount":2000000}}} ]}, "blockNumber": 56938742, ... }], "success": true}
+
+        Returns a list of dicts with keys: txid, from, to, value (sun), blockNumber
+        """
+        # Prefer TronGrid v1 and filter for incoming transfers
+        res = self.make_request(
+            f"/v1/accounts/{address}/transactions?limit={limit}&only_to=true"
+        )
+        data_list = []
+        self.logger.info(f"TronGrid v1 transactions for {address}: {res}")
+        if res and isinstance(res, dict) and res.get("data") is not None:
+            data_list = res.get("data", [])
+            self.logger.info(f"TronGrid v1 transactions for {address}: {data_list}")
+        else:
+            # Fallback: try without only_to filter
+            res = self.make_request(f"/v1/accounts/{address}/transactions?limit={limit}")
+            if res and isinstance(res, dict):
+                data_list = res.get("data", [])
+
+        normalized: List[Dict] = []
+        for item in data_list:
+            try:
+                txid = item.get("txID") or item.get("txid") or item.get("hash") or item.get("transaction_id")
+                blk = item.get("blockNumber") or item.get("block") or 0
+                from_addr = item.get("from") or item.get("ownerAddress") or item.get("owner_address")
+                to_addr = item.get("to") or item.get("toAddress") or item.get("to_address")
+                amount_sun = item.get("amount") or item.get("value")
+
+                if not (from_addr and to_addr and amount_sun):
+                    rd = item.get("raw_data") or {}
+                    contracts = rd.get("contract") or []
+                    if contracts:
+                        c0 = contracts[0]
+                        pv = ((c0.get("parameter") or {}).get("value") or {})
+                        from_addr = from_addr or pv.get("owner_address") or pv.get("from")
+                        to_addr = to_addr or pv.get("to_address") or pv.get("to")
+                        amount_sun = amount_sun or pv.get("amount")
+
+                # Normalize addresses to base58 (convert 41-hex to base58 if needed)
+                from_b58 = self._to_base58_address(from_addr) if from_addr else None
+                to_b58 = self._to_base58_address(to_addr) if to_addr else None
+
+                if not (txid and to_b58 and amount_sun is not None):
+                    continue
+
+                normalized.append({
+                    "txid": txid,
+                    "from": from_b58,
+                    "to": to_b58,
+                    "value": int(amount_sun),  # sun
+                    "blockNumber": int(blk or 0)
+                })
+            except Exception as e:
+                self.logger.error("Failed to normalize TRX tx item: %s", e)
+                continue
+        self.logger.info(f"Normalized transactions: {normalized}")
+        return normalized
+
+    def get_trc20_transactions_by_address(
+        self,
+        address: str,
+        limit: int = 20,
+        only_to: bool = True,
+        contract_addresses: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get TRC-20 token transfer transactions for an address via TronGrid v1 and
+        normalize to a consistent shape.
+
+        - Endpoint (Shasta): /v1/accounts/{address}/transactions/trc20
+        - Docs: https://developers.tron.network/reference/
+
+        Returns a list of dicts with at least:
+          {
+            "txid": str,                 # transaction_id
+            "from": str,                 # base58 address
+            "to": str,                   # base58 address
+            "token_symbol": str,
+            "token_address": str,
+            "decimals": int,
+            "value_smallest": int,       # integer value in token smallest units
+            "block_timestamp": int,      # ms
+            "type": str                  # typically "Transfer"
+          }
+        """
+        try:
+            url = f"/v1/accounts/{address}/transactions/trc20?limit={limit}"
+            if only_to:
+                url += "&only_to=true"
+
+            result = self.make_request(url, method="GET")
+            items = []
+            if result and isinstance(result, dict):
+                items = result.get("data", []) or []
+
+            normalized: List[Dict[str, Any]] = []
+            for item in items:
+                try:
+                    txid = item.get("transaction_id")
+                    from_addr = item.get("from")
+                    to_addr = item.get("to")
+                    token_info = item.get("token_info") or {}
+                    token_symbol = token_info.get("symbol")
+                    token_address = token_info.get("address")
+                    decimals = int(token_info.get("decimals", 0))
+                    value_str = item.get("value")
+                    value_smallest = int(value_str) if value_str is not None else 0
+                    block_ts = int(item.get("block_timestamp") or 0)
+                    tx_type = item.get("type", "Transfer")
+
+                    # Optional filtering by specific token contracts
+                    if contract_addresses and token_address not in contract_addresses:
+                        continue
+
+                    # Basic validation
+                    if not (txid and to_addr and value_smallest is not None and token_address):
+                        continue
+
+                    normalized.append({
+                        "txid": txid,
+                        "from": from_addr,
+                        "to": to_addr,
+                        "token_symbol": token_symbol,
+                        "token_address": token_address,
+                        "decimals": decimals,
+                        "value_smallest": value_smallest,
+                        "block_timestamp": block_ts,
+                        "type": tx_type,
+                    })
+                except Exception as e:
+                    self.logger.error("Failed to normalize TRC20 tx item: %s", e)
+                    continue
+
+            return normalized
+        except Exception as e:
+            self.logger.error("Error fetching TRC20 transactions: %s", e)
+            return []
+
+    # ===== Token account helpers =====
+
+    def create_token_account(self, token_symbol: str, token_decimals: int = 6, label: Optional[str] = None) -> Optional[Account]:
+        """
+        Create a CRYPTO account for a TRC-20 token (e.g., USDT) for this user.
+
+        Notes:
+        - The token account shares the same on-chain address as the TRX account.
+        - We do NOT create a new CryptoAddress row to avoid duplicating the same address
+          (the CryptoAddress.address column is globally unique). Token monitoring should
+          reference the user's TRX address.
+        - The account's precision_config is set with the provided token_decimals.
+        """
+        try:
+            # Check if token account already exists
+            existing = self.session.query(Account).filter_by(
+                user_id=self.user_id,
+                currency=token_symbol.upper(),
+                account_type=AccountType.CRYPTO,
+            ).first()
+            if existing:
+                self.logger.info("[%s] Token account already exists for user %s", token_symbol, self.user_id)
+                return existing
+
+            token_account = Account(
+                user_id=self.user_id,
+                balance=0,
+                locked_amount=0,
+                currency=token_symbol.upper(),
+                account_type=AccountType.CRYPTO,
+                account_number=generate_unique_account_number(session=self.session, length=10),
+                label=label or f"{token_symbol.upper()} Account",
+                precision_config={
+                    "currency": token_symbol.upper(),
+                    "decimals": token_decimals,
+                    "smallest_unit": "units",
+                    "parent_currency": "TRX"
+                },
+            )
+            self.session.add(token_account)
+            self.session.commit()
+            self.session.refresh(token_account)
+            self.logger.info("[%s] Created token account for user %s (id=%s)", token_symbol, self.user_id, token_account.id)
+            return token_account
+        except Exception as e:
+            self.logger.error("Failed to create token account %s for user %s: %s", token_symbol, self.user_id, e)
+            self.session.rollback()
+            return None
+
+    def create_usdt_account(self) -> Optional[Account]:
+        """Convenience helper to create a USDT (TRC-20) account with 6 decimals."""
+        return self.create_token_account("USDT", token_decimals=6, label="USDT Wallet")
 
     def get_block_info(self, block_number: int = None) -> Optional[Dict]:
-        """Get block information"""
-        if block_number:
-            result = self.make_request(f"/v1/blocks/{block_number}")
-        else:
-            result = self.make_request("/v1/blocks/latest")
-        return result.get("data", [{}])[0] if result and "data" in result else None
+        """Get block information from TronGrid (v1) with Shasta-compatible fallbacks."""
+        try:
+            if block_number is None:
+                # Prefer Solidity API (GET) for latest block
+                r = self.make_request("/walletsolidity/getnowblock", method="GET")
+                if isinstance(r, dict) and r:
+                    return r
+                # Fallback to full node (POST)
+                fr = self.make_request("/wallet/getnowblock", method="POST", data={})
+                if isinstance(fr, dict) and fr:
+                    return fr
+                # Last resort: TronGrid v1 query for latest
+                vg = self.make_request("/v1/blocks?limit=1&sort=-number", method="GET")
+                if vg and isinstance(vg, dict) and vg.get("data"):
+                    return vg["data"][0]
+                return None
+            else:
+                # Specific block by number: try Solidity POST first
+                r = self.make_request("/walletsolidity/getblockbynum", method="POST", data={"num": int(block_number)})
+                if isinstance(r, dict) and r:
+                    return r
+                # Fallback to full node POST
+                fr = self.make_request("/wallet/getblockbynum", method="POST", data={"num": int(block_number)})
+                if isinstance(fr, dict) and fr:
+                    return fr
+                # Last resort: TronGrid v1
+                vg = self.make_request(f"/v1/blocks/{block_number}", method="GET")
+                if vg and isinstance(vg, dict) and vg.get("data"):
+                    return vg["data"][0]
+                return None
+        except Exception as e:
+            self.logger.error("Error fetching Tron block info: %s", e)
+            return None
 
     def get_network_info(self) -> Optional[Dict]:
         """Get network information"""
@@ -289,7 +540,7 @@ class TronWallet:
             
             # Tron uses the TRX HD wallet
             mnemonic_key = f"{self.symbol}_MNEMONIC"
-            mnemonic = config(mnemonic_key, default=None)
+            mnemonic = env_config(mnemonic_key, default=None)
             
             if not mnemonic:
                 self.logger.error(f"No mnemonic configured for {self.symbol}")
@@ -470,7 +721,7 @@ class TronWallet:
         """Generate a new address with guaranteed uniqueness"""
         try:
             for attempt in range(max_attempts):
-                new_address = self.generate_new_address()
+                new_address = self.generate_new_address(index=self.account_id)
                 if new_address:
                     # Double-check uniqueness
                     if not self._address_exists(new_address["address"]):
@@ -484,4 +735,187 @@ class TronWallet:
             
         except Exception as e:
             self.logger.error(f"Error ensuring address uniqueness: {e}")
+            return None 
+
+    # ===== Sending Transactions (TRX) =====
+
+    def send_transaction(self, to_address: str, amount_trx: float) -> Optional[Dict[str, Any]]:
+        """
+        Send a TRX transfer from the wallet's active address.
+
+        Uses tronpy for signing and broadcasting. Requires `tronpy` to be installed.
+        """
+        try:
+            # Lazy import to avoid hard dependency when unused
+            from tronpy import Tron
+            from tronpy.keys import PrivateKey
+        except Exception as e:
+            self.logger.error(f"tronpy is required for TRX withdrawals: {e}")
+            raise
+
+        try:
+            # Get the active address for this account
+            crypto_address = self.session.query(CryptoAddress).filter_by(
+                account_id=self.account_id,
+                currency_code=self.symbol,
+                is_active=True
+            ).first()
+
+            if not crypto_address:
+                raise ValueError(f"No active {self.symbol} address found for account {self.account_id}")
+
+            # Decrypt private key
+            private_key_plain = self.decrypt_private_key(crypto_address.private_key)
+
+            # Select network
+            network = 'mainnet' if self.tron_config.network == 'mainnet' else 'shasta'
+            client = Tron(network=network)
+
+            # Amount in Sun (1 TRX = 1_000_000 Sun)
+            amount_sun = int(amount_trx * 1_000_000)
+
+            txn = (
+                client.trx
+                .transfer(crypto_address.address, to_address, amount_sun)
+                .build()
+                .sign(PrivateKey(bytes.fromhex(private_key_plain)))
+                .broadcast()
+            )
+
+            # tronpy returns a dict-like object with txid
+            tx_id = txn.get('txid') if isinstance(txn, dict) else getattr(txn, 'txid', None)
+
+            if not tx_id:
+                raise ValueError("Failed to obtain TRX transaction id from broadcast response")
+
+            self.logger.info(f"📤 TRX transaction sent: {amount_trx} TRX to {to_address}, txid={tx_id}")
+
+            return {
+                "status": "sent",
+                "transaction_hash": tx_id,
+                "from_address": crypto_address.address,
+                "to_address": to_address,
+                "amount_trx": amount_trx,
+                "amount_sun": amount_sun,
+            }
+        except Exception as e:
+            self.logger.error(f"❌ Error sending TRX transaction: {e}")
+            raise
+
+    # ===== Sending Transactions (TRC-20) =====
+
+    def send_trc20_transfer(
+        self,
+        contract_address: str,
+        to_address: str,
+        amount_standard: float,
+        decimals: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Send a TRC-20 token transfer from the wallet's active TRX address.
+
+        - contract_address: base58 contract address (e.g., USDT on Shasta)
+        - to_address: recipient base58 address
+        - amount_standard: human-readable token amount (e.g., 1.5 USDT)
+        - decimals: token decimals (e.g., 6 for USDT)
+        """
+        try:
+            from tronpy import Tron
+            from tronpy.keys import PrivateKey
+        except Exception as e:
+            self.logger.error(f"tronpy is required for TRC20 withdrawals: {e}")
+            raise
+
+        try:
+            # Use the active TRX address for signing
+            crypto_address = self.session.query(CryptoAddress).filter_by(
+                account_id=self.account_id,
+                currency_code=self.symbol,
+                is_active=True,
+            ).first()
+            if not crypto_address:
+                raise ValueError(f"No active {self.symbol} address found for account {self.account_id}")
+
+            private_key_plain = self.decrypt_private_key(crypto_address.private_key)
+            network = 'mainnet' if self.tron_config.network == 'mainnet' else 'shasta'
+            client = Tron(network=network)
+
+            amount_smallest = int(round(amount_standard * (10 ** int(decimals or 0))))
+            contract = client.get_contract(contract_address)
+
+            txn = (
+                contract.functions.transfer(to_address, amount_smallest)
+                .with_owner(crypto_address.address)
+                .fee_limit(10_000_000)
+                .build()
+                .sign(PrivateKey(bytes.fromhex(private_key_plain)))
+                .broadcast()
+            )
+
+            tx_id = txn.get('txid') if isinstance(txn, dict) else getattr(txn, 'txid', None)
+            if not tx_id:
+                raise ValueError("Failed to obtain TRC20 transaction id from broadcast response")
+
+            self.logger.info(
+                "📤 TRC20 transfer sent: %s (%s decimals=%s) to %s, txid=%s",
+                amount_standard,
+                contract_address,
+                decimals,
+                to_address,
+                tx_id,
+            )
+
+            return {
+                "status": "sent",
+                "transaction_hash": tx_id,
+                "from_address": crypto_address.address,
+                "to_address": to_address,
+                "amount_standard": amount_standard,
+                "amount_smallest": amount_smallest,
+                "contract_address": contract_address,
+                "decimals": decimals,
+            }
+        except Exception as e:
+            self.logger.error(f"❌ Error sending TRC20 transfer: {e}")
+            raise
+
+    # ===== Helpers for confirmations =====
+
+    def get_latest_block_number(self) -> Optional[int]:
+        try:
+            info = self.get_block_info()
+            if not info:
+                return None
+            # TronGrid v1 shape
+            if 'number' in info:
+                try:
+                    return int(info['number'])
+                except Exception:
+                    pass
+            # Fullnode shape
+            header = info.get('block_header') if isinstance(info, dict) else None
+            if header and isinstance(header, dict):
+                raw_data = header.get('raw_data') or {}
+                if 'number' in raw_data:
+                    return int(raw_data['number'])
+            return None
+        except Exception as e:
+            self.logger.error("Error getting latest Tron block number: %s", e)
+            return None
+
+    def extract_block_number_from_tx(self, tx_info: Dict[str, Any]) -> Optional[int]:
+        try:
+            if not tx_info:
+                return None
+            # Try TronGrid shapes
+            if 'blockNumber' in tx_info:
+                return int(tx_info['blockNumber'])
+            if 'block' in tx_info:
+                return int(tx_info['block'])
+            # Try nested receipt info
+            receipt = tx_info.get('receipt') or tx_info.get('ret', [{}])[0]
+            if isinstance(receipt, dict) and 'blockNumber' in receipt:
+                return int(receipt['blockNumber'])
+            return None
+        except Exception:
             return None 

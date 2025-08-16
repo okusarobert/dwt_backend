@@ -20,9 +20,17 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     # Add webhook_ids column to crypto_addresses table
-    op.add_column('crypto_addresses', sa.Column('webhook_ids', sa.JSON(), nullable=True))
+    connection = op.get_bind()
+    inspector = sa.inspect(connection)
+    columns = [c['name'] for c in inspector.get_columns('crypto_addresses')]
+    if 'webhook_ids' not in columns:
+        op.add_column('crypto_addresses', sa.Column('webhook_ids', sa.JSON(), nullable=True))
 
 
 def downgrade() -> None:
     # Remove webhook_ids column from crypto_addresses table
-    op.drop_column('crypto_addresses', 'webhook_ids')
+    connection = op.get_bind()
+    inspector = sa.inspect(connection)
+    columns = [c['name'] for c in inspector.get_columns('crypto_addresses')]
+    if 'webhook_ids' in columns:
+        op.drop_column('crypto_addresses', 'webhook_ids')

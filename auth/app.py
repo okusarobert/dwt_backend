@@ -2,9 +2,11 @@ from decouple import config
 import os
 import logging
 import sys
-from flask import Flask, request, jsonify, g
+from flask import Flask, request, jsonify, g, make_response
+from flask_cors import CORS
 from db.connection import session
 from db import User, UserRole, EmailVerify, EmailVerifyStatus, ForgotPassword, ForgotPasswordStatus
+from db.wallet import Account, AccountType
 from pydantic import BaseModel, Field
 from typing import Optional
 import re
@@ -23,10 +25,6 @@ import uuid
 # from flask_sqlalchemy import SQLAlchemy
 
 # db = SQLAlchemy()
-
-# 216000 - iterations
-app = Flask(__name__)
-# db.init_app(app)
 
 # def start_consumer():
 #     logger.info("Starting auth consumer")
@@ -54,19 +52,90 @@ USER_REGISTERED_TOPIC = os.getenv("USER_REGISTERED_TOPIC", "user.registered")
 # In-memory store for demo (optional, can be removed later)
 transaction_refs = {}
 
+# Initialize Flask app with CORS
+app = Flask(__name__)
+
+# Enable CORS for all routes
+# CORS(app, resources={
+#     r"/*": {
+#         "origins": ["http://localhost:3001", "http://localhost:3000", "http://127.0.0.1:3001", "http://127.0.0.1:3000"],
+#         "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+#         "allow_headers": ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
+#         "supports_credentials": True,
+#         "max_age": 86400,
+#     }
+# })
+
+
+def create_auth_response(token: str, user_data: dict = None, status_code: int = 200):
+    """Create a response with HTTP-only cookie for authentication"""
+    response_data = {"message": "Authentication successful"}
+    if user_data:
+        response_data.update(user_data)
+    
+    response = make_response(jsonify(response_data), status_code)
+    
+    # Set HTTP-only cookie with secure settings
+    # In development, we need to set secure=False for HTTP
+    is_development = os.getenv('FLASK_ENV') == 'development' or os.getenv('FLASK_DEBUG') == '1'
+    
+    # For localhost development or Docker containers, always set secure=False
+    is_localhost = request.host.startswith('localhost') or request.host.startswith('127.0.0.1')
+    is_docker_container = request.host.startswith('auth:') or request.host.startswith('api:') or request.host.startswith('nginx:')
+    
+    # Determine cookie domain based on environment
+    cookie_domain = None  # Default to current domain
+    if not is_development and not is_localhost and not is_docker_container:
+        # In production, set domain from environment
+        cookie_domain = os.getenv('COOKIE_DOMAIN')
+    
+    logger.info(f"Setting auth cookie - Development: {is_development}, Localhost: {is_localhost}, Docker: {is_docker_container}, Host: {request.host}")
+    logger.info(f"Cookie secure flag will be: {not (is_development or is_localhost or is_docker_container)}")
+    logger.info(f"Cookie domain will be: {cookie_domain}")
+    
+    response.set_cookie(
+        'auth-token',
+        token,
+        max_age=30 * 24 * 60 * 60,  # 30 days
+        path='/',
+        domain=cookie_domain,  # Use environment-aware domain
+        httponly=True,  # HTTP-only cookie (cannot be accessed by JavaScript)
+        secure=not (is_development or is_localhost or is_docker_container),  # Only sent over HTTPS (False for development/localhost/docker)
+        samesite='Lax'  # CSRF protection
+    )
+    
+    logger.info("Auth cookie set successfully")
+    return response
+
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
     data = LoginDto(**data)
+    logger.info("LOGIN: data: %s", data)
     errors = validate_login(data, session)
+    logger.info("LOGIN: errors: %s", errors)
     if not errors:
         # login is successful
         secret = config("JWT_SECRET")
         user = session.query(User).filter(User.email == data.email.lower()).first()
-        payload = {"user_id": user.id, "exp": datetime.datetime.utcnow(
+        payload = {"user_id": user.id, "exp": datetime.datetime.now(
         ) + datetime.timedelta(hours=24*30)}
         encoded = jwt.encode(payload, secret, algorithm="HS256")
-        return jsonify({"token": encoded}), 200
+        
+        # Return response with HTTP-only cookie
+        return create_auth_response(encoded, {
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "phone_number": user.phone_number,
+                "role": user.role.value,
+                "ref_code": user.ref_code,
+                "country": user.country,
+                "created_at": user.created_at.isoformat() if user.created_at else None
+            }
+        })
     else:
         return jsonify(errors), 401
 
@@ -90,13 +159,19 @@ def register():
             user.ref_code = f"{ref_code}"
             user.country = "UG"
             session.add(user)
+            session.flush()  # Get the user ID
+            
+            # Create default UGX account
             account = Account()
             account.user_id = user.id
-            account.currency_code = "UGX"
+            account.currency = "UGX"
             account.balance = 0
             account.locked_amount = 0
-            account.status = AccountStatus.ACTIVE
+            account.account_type = AccountType.FIAT
+            account.account_number = generate_random_digits(10)
+            account.label = "Main Account"
             session.add(account)
+            
             session.commit()
             topic = "verify_email"
             # send a verification code
@@ -112,6 +187,36 @@ def register():
             return jsonify({"message":"Error registering user"}), 500
     else:
         return jsonify(errors), 400
+
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    """Logout endpoint that clears the auth cookie"""
+    try:
+        # Determine if we're in development or production
+        is_development = os.getenv('FLASK_ENV') == 'development' or os.getenv('FLASK_DEBUG') == '1'
+        is_localhost = request.host.startswith('localhost') or request.host.startswith('127.0.0.1')
+        is_docker_container = request.host.startswith('auth:') or request.host.startswith('api:') or request.host.startswith('nginx:')
+        
+        # Create response
+        response = make_response(jsonify({"message": "Logged out successfully"}), 200)
+        
+        # Clear the auth cookie with proper settings
+        response.delete_cookie(
+            'auth-token',
+            path='/',
+            domain=None,  # Let the browser determine the domain
+            secure=not (is_development or is_localhost or is_docker_container),
+            httponly=True,
+            samesite='Lax'
+        )
+        
+        app.logger.info(f"Logout successful - cleared auth-token cookie")
+        return response
+        
+    except Exception as e:
+        app.logger.error(f"Error during logout: {e}")
+        return jsonify({"error": "Logout failed"}), 500
 
 
 @app.route('/verify-email', methods=['POST'])
@@ -224,7 +329,7 @@ def user_config():
     locked_amount = float(account.locked_amount) if account else 0.0
     currency = account.currency if account and account.currency else default_currency
 
-    payload = {
+    user_data = {
         "id": g.user.id,
         "first_name": g.user.first_name,
         "last_name": g.user.last_name,
@@ -235,6 +340,11 @@ def user_config():
         "locked_amount": locked_amount,
         "min_deposit": min_deposit,
         "max_deposit": max_deposit,
+    }
+    
+    # Return in the format expected by the frontend
+    payload = {
+        "user": user_data
     }
     return jsonify(payload), 200
 

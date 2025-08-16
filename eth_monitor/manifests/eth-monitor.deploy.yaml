@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eth-monitor
+  namespace: default
+  labels:
+    app: eth-monitor
+    tier: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eth-monitor
+  template:
+    metadata:
+      labels:
+        app: eth-monitor
+        tier: backend
+    spec:
+      containers:
+        - name: eth-monitor
+          image: eth-monitor:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: general-config
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: general-config
+                  key: DB_PORT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: general-config
+                  key: DB_NAME
+            - name: DB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: general-config
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: general-secret
+                  key: DB_PASSWORD
+            - name: ALCHEMY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: eth-monitor-secret
+                  key: ALCHEMY_API_KEY
+            - name: ETH_NETWORK
+              valueFrom:
+                configMapKeyRef:
+                  name: eth-monitor-config
+                  key: ETH_NETWORK
+            - name: APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: general-secret
+                  key: APP_SECRET
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: eth-monitor-config
+                  key: KAFKA_BOOTSTRAP_SERVERS
+            - name: ETH_ADDRESS_TOPIC
+              valueFrom:
+                configMapKeyRef:
+                  name: eth-monitor-config
+                  key: ETH_ADDRESS_TOPIC
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: shared-volume
+              mountPath: /app/shared
+      volumes:
+        - name: shared-volume
+          emptyDir: {} 

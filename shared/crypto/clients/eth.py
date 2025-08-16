@@ -7,6 +7,7 @@ import time
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 from pydantic import BaseModel
+from datetime import datetime
 
 from db.utils import generate_unique_account_number
 from shared.logger import setup_logging
@@ -66,7 +67,7 @@ class EthereumConfig:
 class ETHWallet:
     account_id = None
 
-    def __init__(self, user_id: int, config: EthereumConfig, session: Session, logger: logging.Logger = None):
+    def __init__(self, user_id: int, eth_config: EthereumConfig, session: Session, logger: logging.Logger = None):
         self.user_id = user_id
         self.label = "ETH Wallet"
         self.account_number = generate_unique_account_number(session=session, length=10)
@@ -74,7 +75,7 @@ class ETHWallet:
         self.logger = logger or setup_logging()
         self.symbol = "ETH"
         self.app_secret = config('APP_SECRET', default='your-app-secret-key')
-        self.config = config
+        self.config = eth_config
         self.session_request = requests.Session()
         self.session_request.headers.update({
             'Content-Type': 'application/json',
@@ -120,7 +121,7 @@ class ETHWallet:
             self.session.add(crypto_account)
             self.session.flush()  # Get the ID without committing
             self.account_id = crypto_account.id
-            self.create_address()
+            self.create_address(notify=True)
             self.logger.info(
                 f"[Wallet] Created {self.symbol} crypto account for user {self.user_id}")
         except Exception as e:
@@ -128,7 +129,7 @@ class ETHWallet:
             self.logger.error(traceback.format_exc())
             raise  # Re-raise the exception so the wallet service can handle it
 
-    def create_address(self):
+    def create_address(self, notify: bool = True):
         """Create a new ETH address for the wallet."""
         try:
             self.logger.info(f"Creating address for user {self.user_id}")
@@ -149,7 +150,7 @@ class ETHWallet:
                 # Create crypto address record for user's address
                 crypto_address = CryptoAddress(
                     account_id=self.account_id,
-                    address=user_address,
+                    address=user_address.lower(),
                     label=self.label,
                     is_active=True,
                     currency_code=self.symbol,
@@ -160,6 +161,10 @@ class ETHWallet:
                 self.session.add(crypto_address)
                 
                 self.logger.info(f"Created user address: {user_address}")
+                
+                # Send Kafka notification about new address creation (if enabled)
+                if notify:
+                    self._notify_address_created(user_address)
                     
         except Exception as e:
             self.logger.error(f"[ETH] Failed to create address for user {self.user_id}: {e!r}")
@@ -167,6 +172,32 @@ class ETHWallet:
             raise  # Re-raise the exception so the wallet service can handle it
         finally:
             self.logger.info(f"Done creating address for user {self.user_id}")
+
+    def _notify_address_created(self, address: str):
+        """Notify about new Ethereum address creation via Kafka"""
+        try:
+            # Import here to avoid circular imports
+            from shared.kafka_producer import get_kafka_producer
+            
+            producer = get_kafka_producer()
+            producer.send("ethereum-address-events", {
+                "event_type": "ethereum_address_created",
+                "address_data": {
+                    "address": address,
+                    "currency_code": self.symbol,
+                    "account_id": self.account_id,
+                    "user_id": self.user_id,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            })
+            self.logger.info(f"📨 Sent Ethereum address creation event for {address}")
+        except Exception as e:
+            self.logger.error(f"Failed to notify Ethereum address creation: {e}")
+            # Don't raise the exception to avoid breaking the address creation process
+
+    def notify_existing_address(self, address: str):
+        """Manually send notification for an existing address"""
+        self._notify_address_created(address)
 
     # ===== Alchemy API Methods =====
     
@@ -328,7 +359,31 @@ class ETHWallet:
             params["topics"] = topics
             
         result = self.make_request("eth_getLogs", [params])
+        self.logger.info(f"Logs: {result}")
         return result.get("result") if result else None
+
+    def get_asset_transfers(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Call Alchemy Transfers API (alchemy_getAssetTransfers) and auto-paginate using pageKey.
+        Docs: https://www.alchemy.com/docs/reference/transfers-api-quickstart
+        """
+        transfers: List[Dict[str, Any]] = []
+        try:
+            req_params = dict(params) if params else {}
+            while True:
+                resp = self.make_request("alchemy_getAssetTransfers", [req_params])
+                if not resp or "result" not in resp:
+                    break
+                result = resp.get("result") or {}
+                batch = result.get("transfers") or []
+                transfers.extend(batch)
+                page_key = result.get("pageKey")
+                if not page_key:
+                    break
+                req_params = {**req_params, "pageKey": page_key}
+        except Exception as e:
+            self.logger.error(f"Error calling alchemy_getAssetTransfers: {e}")
+        return transfers
 
     def get_network_info(self) -> Dict[str, Any]:
         """Get network information"""
@@ -395,4 +450,275 @@ class ETHWallet:
             }
         except Exception as e:
             self.logger.error(f"Error getting blockchain info: {e}")
-            return {} 
+            return {}
+    
+    def send_transaction(self, to_address: str, amount_eth: float, gas_limit: int = 21000) -> Optional[Dict]:
+        """
+        Send an Ethereum transaction
+        
+        Args:
+            to_address: Destination address
+            amount_eth: Amount in ETH
+            gas_limit: Gas limit for the transaction
+            
+        Returns:
+            Dict with transaction hash and status
+        """
+        try:
+            # Get the crypto address for this account
+            crypto_address = self.session.query(CryptoAddress).filter_by(
+                account_id=self.account_id,
+                currency_code="ETH",
+                is_active=True
+            ).first()
+            
+            if not crypto_address:
+                raise ValueError(f"No active ETH address found for account {self.account_id}")
+            
+            # Decrypt the private key
+            private_key = self.decrypt_private_key(crypto_address.private_key)
+            
+            # Get current gas price
+            gas_price_result = self.get_gas_price()
+            if not gas_price_result:
+                raise ValueError("Failed to get gas price")
+            
+            gas_price = gas_price_result.get("gas_price_wei", 0)
+            
+            # Get nonce
+            nonce = self.get_transaction_count(crypto_address.address)
+            if nonce is None:
+                raise ValueError("Failed to get transaction count")
+            
+            # Convert amount to wei
+            amount_wei = int(amount_eth * 10**18)
+            
+            # Create transaction parameters
+            tx_params = {
+                "from": crypto_address.address,
+                "to": to_address,
+                "value": hex(amount_wei),
+                "gas": hex(gas_limit),
+                "gasPrice": hex(gas_price),
+                "nonce": hex(nonce)
+            }
+            
+            # Estimate gas if needed
+            gas_estimate = self.estimate_gas(crypto_address.address, to_address, hex(amount_wei))
+            if gas_estimate:
+                estimated_gas = int(gas_estimate.get("result", "0x0"), 16)
+                tx_params["gas"] = hex(max(estimated_gas, gas_limit))
+            
+            # Sign and send transaction using Alchemy's eth_sendRawTransaction
+            # First, we need to sign the transaction with the private key
+            from eth_account import Account
+            
+            # Create the transaction for signing
+            transaction = {
+                'to': to_address,
+                'value': amount_wei,
+                'gas': gas_limit,
+                'gasPrice': gas_price,
+                'nonce': nonce,
+                'chainId': 11155111  # Sepolia testnet chain ID
+            }
+            
+            # Sign the transaction
+            signed_txn = Account.sign_transaction(transaction, private_key)
+            
+            # Send the signed transaction
+            raw_tx_hash = signed_txn.raw_transaction.hex()
+            send_result = self.make_request("eth_sendRawTransaction", [raw_tx_hash])
+            
+            if not send_result or "result" not in send_result:
+                error_msg = send_result.get("error", {}).get("message", "Unknown error") if send_result else "No response"
+                raise ValueError(f"Failed to send transaction: {error_msg}")
+            
+            tx_hash = send_result["result"]
+            
+            self.logger.info(f"📤 ETH transaction sent: {amount_eth} ETH to {to_address}")
+            self.logger.info(f"   Transaction Hash: {tx_hash}")
+            self.logger.info(f"   Gas Price: {gas_price} wei")
+            self.logger.info(f"   Gas Limit: {gas_limit}")
+            self.logger.info(f"   Nonce: {nonce}")
+            
+            return {
+                "status": "sent",
+                "transaction_hash": tx_hash,
+                "transaction_params": tx_params,
+                "from_address": crypto_address.address,
+                "to_address": to_address,
+                "amount_eth": amount_eth,
+                "amount_wei": amount_wei,
+                "gas_price": gas_price,
+                "gas_limit": gas_limit,
+                "nonce": nonce,
+                "estimated_cost_wei": gas_price * gas_limit,
+                "estimated_cost_eth": (gas_price * gas_limit) / 10**18
+            }
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error sending ETH transaction: {e}")
+            raise
+
+    def send_erc20_transfer(self, contract_address: str, to_address: str, amount_standard: float, decimals: int) -> Optional[Dict]:
+        """Send an ERC-20 transfer using raw calldata (transfer(address,uint256))."""
+        try:
+            # Get sender crypto address
+            crypto_address = self.session.query(CryptoAddress).filter_by(
+                account_id=self.account_id,
+                currency_code="ETH",
+                is_active=True,
+            ).first()
+            if not crypto_address:
+                raise ValueError(f"No active ETH address found for account {self.account_id}")
+
+            self.logger.info(f"Sending ERC20 transfer: {amount_standard} {crypto_address.address} to {to_address} on {contract_address}")
+            # Decrypt private key
+            private_key = self.decrypt_private_key(crypto_address.private_key)
+
+            # Gas price and nonce
+            gas_price_result = self.get_gas_price()
+            if not gas_price_result:
+                raise ValueError("Failed to get gas price")
+            gas_price = gas_price_result.get("gas_price_wei", 0)
+            nonce = self.get_transaction_count(crypto_address.address)
+            if nonce is None:
+                raise ValueError("Failed to get transaction count")
+
+            # Value (smallest units)
+            value_smallest = int(round(amount_standard * (10 ** int(decimals or 0))))
+
+            # Build ERC-20 transfer calldata: function selector 0xa9059cbb + 32-byte addr + 32-byte value
+            fn_selector = "0xa9059cbb"
+            to_padded = to_address.lower().replace("0x", "").rjust(64, "0")
+            value_padded = hex(value_smallest)[2:].rjust(64, "0")
+            data = fn_selector + to_padded + value_padded
+
+            # Estimate gas
+            gas_limit = 100000  # default upper bound
+            try:
+                est = self.estimate_gas(crypto_address.address, contract_address, "0x0", data)
+                if est and "gas_estimate" in est:
+                    gas_limit = max(gas_limit, int(est["gas_estimate"]))
+            except Exception:
+                pass
+
+            # Sign and send raw transaction
+            from eth_account import Account as EthAccount
+            chain_id = 11155111 if self.config.network == "sepolia" else 1
+            tx = {
+                "to": contract_address,
+                "value": 0,
+                "gas": gas_limit,
+                "gasPrice": gas_price,
+                "nonce": nonce,
+                "data": data,
+                "chainId": chain_id,
+            }
+            signed = EthAccount.sign_transaction(tx, private_key)
+            raw = signed.raw_transaction.hex()
+            send_result = self.make_request("eth_sendRawTransaction", [raw])
+            if not send_result or "result" not in send_result:
+                error_msg = send_result.get("error", {}).get("message", "Unknown error") if send_result else "No response"
+                raise ValueError(f"Failed to send ERC20 transfer: {error_msg}")
+            tx_hash = send_result["result"]
+            self.logger.info(f"📤 ERC20 transfer sent: {amount_standard} to {to_address} on {contract_address}; tx={tx_hash}")
+            return {
+                "status": "sent",
+                "transaction_hash": tx_hash,
+                "from_address": crypto_address.address,
+                "to_address": to_address,
+                "contract_address": contract_address,
+                "amount_standard": amount_standard,
+                "amount_smallest": value_smallest,
+                "gas_price": gas_price,
+                "gas_limit": gas_limit,
+                "nonce": nonce,
+            }
+        except Exception as e:
+            self.logger.error(f"❌ Error sending ERC20 transfer: {e}")
+            raise
+
+    # ===== Token account helpers (ERC-20) =====
+
+    def create_token_account(self, token_symbol: str, token_decimals: int = 18, label: Optional[str] = None) -> Optional[Account]:
+        """
+        Create a CRYPTO `Account` for an ERC-20 token (e.g., USDT/USDC) for this user on Ethereum.
+
+        Notes:
+        - Token account reuses the existing ETH on-chain address; no new CryptoAddress is created here.
+        - `precision_config` is set with provided `token_decimals` and `parent_currency='ETH'`.
+        - Idempotent per (user, symbol, parent ETH): if one exists, return it.
+        """
+        try:
+            # Check if a token account already exists for this user on ETH
+            existing = (
+                self.session.query(Account)
+                .filter(
+                    Account.user_id == self.user_id,
+                    Account.account_type == AccountType.CRYPTO,
+                    Account.currency == token_symbol.upper(),
+                )
+                .all()
+            )
+            for acc in existing:
+                cfg = acc.precision_config or {}
+                if str(cfg.get("parent_currency", "")).upper() == "ETH":
+                    self.logger.info("[%s] Token account already exists for user %s (id=%s)", token_symbol.upper(), self.user_id, acc.id)
+                    return acc
+
+            token_account = Account(
+                user_id=self.user_id,
+                balance=0,
+                locked_amount=0,
+                currency=token_symbol.upper(),
+                account_type=AccountType.CRYPTO,
+                account_number=generate_unique_account_number(session=self.session, length=10),
+                label=label or f"{token_symbol.upper()} Account",
+                precision_config={
+                    "currency": token_symbol.upper(),
+                    "decimals": int(token_decimals),
+                    "smallest_unit": "units",
+                    "parent_currency": "ETH",
+                },
+            )
+            self.session.add(token_account)
+            self.session.commit()
+            self.session.refresh(token_account)
+            self.logger.info("[%s] Created token account for user %s (id=%s)", token_symbol.upper(), self.user_id, token_account.id)
+            return token_account
+        except Exception as e:
+            self.logger.error("Failed to create token account %s for user %s: %s", token_symbol, self.user_id, e)
+            self.session.rollback()
+            return None
+
+    def create_usdt_account(self) -> Optional[Account]:
+        """Convenience helper to create a USDT (ERC-20) account with 6 decimals."""
+        return self.create_token_account("USDT", token_decimals=6, label="USDT Wallet")
+
+    def create_usdc_account(self) -> Optional[Account]:
+        """Convenience helper to create a USDC (ERC-20) account with 6 decimals."""
+        return self.create_token_account("USDC", token_decimals=6, label="USDC Wallet")
+    
+    def get_transaction_status(self, tx_hash: str) -> Optional[Dict]:
+        """Get transaction status and receipt"""
+        try:
+            receipt = self.get_transaction_receipt(tx_hash)
+            if not receipt:
+                return {"status": "pending", "tx_hash": tx_hash}
+            
+            status = "success" if receipt.get("status") == "0x1" else "failed"
+            gas_used = int(receipt.get("gasUsed", "0x0"), 16)
+            block_number = int(receipt.get("blockNumber", "0x0"), 16)
+            
+            return {
+                "status": status,
+                "tx_hash": tx_hash,
+                "gas_used": gas_used,
+                "block_number": block_number,
+                "receipt": receipt
+            }
+        except Exception as e:
+            self.logger.error(f"❌ Error getting transaction status: {e}")
+            return None 

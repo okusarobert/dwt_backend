@@ -6,7 +6,7 @@ from db.wallet import Account, AccountType, CryptoAddress
 # from db.connection import session
 from sqlalchemy.orm import Session
 from decouple import config
-from .HD import BTC
+from ..HD import BTC
 from cryptography.fernet import Fernet
 import base64
 from blockcypher import subscribe_to_address_webhook
@@ -42,7 +42,7 @@ class BitcoinConfig:
     rpc_ssl_verify: bool = True
 
     @classmethod
-    def testnet(cls, api_key: str) -> 'BitcoinConfig':
+    def testnet(cls) -> 'BitcoinConfig':
         btc_daemon_url = config('BTC_DAEMON_URL', default='http://localhost:8332')
         return cls(
             endpoint=f'{btc_daemon_url}',
@@ -59,7 +59,7 @@ class BitcoinConfig:
         )
 
     @classmethod
-    def mainnet(cls, api_key: str) -> 'BitcoinConfig':
+    def mainnet(cls) -> 'BitcoinConfig':
         btc_daemon_url = config('BTC_DAEMON_URL', default='http://localhost:8332')
         return cls(
             endpoint=f'{btc_daemon_url}',
@@ -79,7 +79,7 @@ class BitcoinConfig:
 class BTCWallet:
     account_id = None
 
-    def __init__(self, user_id: int, config: BitcoinConfig, session: Session, logger: logging.Logger = None):
+    def __init__(self, user_id: int, btc_config: BitcoinConfig, session: Session, logger: logging.Logger = None):
         self.user_id = user_id
         self.label = "BTC Wallet"
         self.account_number = generate_unique_account_number(session=session, length=10)
@@ -87,9 +87,9 @@ class BTCWallet:
         self.logger = logger or setup_logging()
         self.symbol = "BTC"
         self.app_secret = config('APP_SECRET', default='your-app-secret-key')
-        self.config = config
+        self.config = btc_config
         self.session_request = requests.Session()
-        self.session_request.headers.update(config.headers)
+        self.session_request.headers.update(btc_config.headers)
         
     def encrypt_private_key(self, private_key: str) -> str:
         """Encrypt private key using APP_SECRET."""
@@ -175,8 +175,8 @@ class BTCWallet:
                 self.logger.info(f"Created user address: {user_address}")
                     
         except Exception as e:
-            self.logger.error(f"[BTC] Failed to create address for user {self.user_id}: {e!r}")
-            self.logger.error(traceback.format_exc())
+            self.logger.info(f"[BTC] Failed to create address for user {self.user_id}: {e!r}")
+            self.logger.info(traceback.format_exc())
             raise  # Re-raise the exception so the wallet service can handle it
         finally:
             self.logger.info(f"Done creating address for user {self.user_id}")

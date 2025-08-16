@@ -113,6 +113,8 @@ services:
       - ./alembic.ini:/app/alembic.ini
       - ./scripts/entrypoint.sh:/app/entrypoint.sh
       - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
+      - ./scripts/cleanup_kafka_jobs.sh:/app/cleanup_kafka_jobs.sh
+      - ./scripts/cleanup_kafka_jobs.py:/app/cleanup_kafka_jobs.py
 
     environment:
       LAUNCH_TYPE: wallet
@@ -154,32 +156,34 @@ services:
 
   # networks:
   #   - tondekanet
-  # websocket:
-  #   build:
-  #     context: .
-  #     dockerfile: ./websocket/Dockerfile
-  #   volumes:
-  #     - ./websocket:/app
-  #     - ./db:/app/db
-  #     - ./shared:/app/shared
-  #     - ./alembic:/app/alembic
-  #     - ./alembic.ini:/app/alembic.ini
-  #     - ./scripts/entrypoint.sh:/app/entrypoint.sh
-  #     - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
+  websocket:
+    build:
+      context: .
+      dockerfile: ./websocket/Dockerfile
+    ports:
+      - "5001:5000"
+    volumes:
+      - ./websocket:/app
+      - ./db:/app/db
+      - ./shared:/app/shared
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./scripts/entrypoint.sh:/app/entrypoint.sh
+      - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
 
-  #   environment:
-  #     LAUNCH_TYPE: websocket
-  #     PYTHONPATH: /app
-  #   env_file: ./.env
-  #   depends_on:
-  #     kafka:
-  #       condition: service_started
-  #     db:
-  #       condition: service_started
-  #     db-migrate:
-  #       condition: service_started
-  #   networks:
-  #     - tondekanet
+    environment:
+      LAUNCH_TYPE: websocket
+      PYTHONPATH: /app
+    env_file: ./.env
+    depends_on:
+      kafka:
+        condition: service_started
+      db:
+        condition: service_started
+      db-migrate:
+        condition: service_started
+    networks:
+      - tondekanet
 
   admin:
     build:
@@ -197,6 +201,7 @@ services:
 
     environment:
       LAUNCH_TYPE: admin
+      PYTHONPATH: /app
     env_file: ./.env
     depends_on:
       - kafka
@@ -433,32 +438,86 @@ services:
   #   volumes:
   #     - ./nodes/bitcart/daemons:/home/electrum/site/daemons
 
-  bitcoin:
-    image: ruimarinho/bitcoin-core:latest
-    container_name: bitcoin
+  # bitcoin:
+  #   image: ruimarinho/bitcoin-core:latest
+  #   container_name: bitcoin
+  #   restart: unless-stopped
+  #   environment:
+  #     BITCOIN_NETWORK: testnet
+  #   ports:
+  #     - "18332:18332" # RPC
+  #     - "18333:18333" # P2P
+  #   volumes:
+  #     - bitcoin_data:/home/bitcoin/.bitcoin
+  #     - ./bitcoin.conf:/home/bitcoin/.bitcoin/bitcoin.conf
+  #   networks:
+  #     - tondekanet
+
+  # litecoin:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.litecoin
+  #   container_name: litecoin
+  #   restart: unless-stopped
+  #   ports:
+  #     - "19332:19332" # RPC
+  #     - "19333:19333" # P2P
+  #   volumes:
+  #     - litecoin_data:/litecoin/.litecoin
+  #   networks:
+  #     - tondekanet
+
+  eth-monitor:
+    build:
+      context: .
+      dockerfile: ./eth_monitor/Dockerfile
+    container_name: eth-monitor
     restart: unless-stopped
-    environment:
-      BITCOIN_NETWORK: testnet
     ports:
-      - "18332:18332" # RPC
-      - "18333:18333" # P2P
+      - "8000:8000" # Health check endpoint
     volumes:
-      - bitcoin_data:/home/bitcoin/.bitcoin
-      - ./bitcoin.conf:/home/bitcoin/.bitcoin/bitcoin.conf
+      - ./eth_monitor:/app
+      - ./db:/app/db
+      - ./shared:/app/shared
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./scripts/entrypoint.sh:/app/entrypoint.sh
+      - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
+    environment:
+      LAUNCH_TYPE: eth_monitor
+      PYTHONPATH: /app
+    env_file: ./.env
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_started
     networks:
       - tondekanet
 
-  litecoin:
+  trx-monitor:
     build:
       context: .
-      dockerfile: Dockerfile.litecoin
-    container_name: litecoin
+      dockerfile: ./trx/Dockerfile
+    container_name: trx-monitor
     restart: unless-stopped
-    ports:
-      - "19332:19332" # RPC
-      - "19333:19333" # P2P
     volumes:
-      - litecoin_data:/litecoin/.litecoin
+      - ./trx:/app
+      - ./db:/app/db
+      - ./shared:/app/shared
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./scripts/entrypoint.sh:/app/entrypoint.sh
+      - ./scripts/wait-for-it.sh:/app/wait-for-it.sh
+    environment:
+      LAUNCH_TYPE: trx_monitor
+      PYTHONPATH: /app
+    env_file: ./.env
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_started
     networks:
       - tondekanet
 
