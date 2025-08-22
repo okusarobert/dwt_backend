@@ -381,15 +381,17 @@ class TronWallet:
         - The account's precision_config is set with the provided token_decimals.
         """
         try:
-            # Check if token account already exists
-            existing = self.session.query(Account).filter_by(
+            # Check if token account already exists with TRX as parent currency
+            existing_accounts = self.session.query(Account).filter_by(
                 user_id=self.user_id,
                 currency=token_symbol.upper(),
                 account_type=AccountType.CRYPTO,
-            ).first()
-            if existing:
-                self.logger.info("[%s] Token account already exists for user %s", token_symbol, self.user_id)
-                return existing
+            ).all()
+            
+            for existing in existing_accounts:
+                if existing.precision_config and existing.precision_config.get("parent_currency") == "TRX":
+                    self.logger.info("[%s] TRC20 token account already exists for user %s", token_symbol, self.user_id)
+                    return existing
 
             token_account = Account(
                 user_id=self.user_id,

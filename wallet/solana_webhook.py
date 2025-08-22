@@ -19,6 +19,17 @@ from db.accounting import JournalEntry, LedgerTransaction, AccountingAccount
 
 logger = setup_logging()
 
+# Import SOL notification service
+try:
+    import sys
+    import os
+    sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+    from solana_webhook_integration import solana_notification_service
+    logger.info("✅ Successfully imported solana_notification_service")
+except ImportError as e:
+    logger.error(f"❌ Failed to import solana_notification_service: {e}")
+    solana_notification_service = None
+
 # Solana webhook blueprint
 solana_webhook = Blueprint('solana_webhook', __name__)
 
@@ -30,43 +41,92 @@ def _alchemy_solana_base_url(network: str) -> str:
         return "https://solana-testnet.g.alchemy.com/v2/"
     return "https://solana-devnet.g.alchemy.com/v2/"
 
-def _create_solana_accounting_entry(transaction: Transaction, account: Account, session_obj):
+def _create_solana_accounting_entry(transaction: Transaction, account: Account, session_obj) -> None:
     """
-    Create accounting journal entry for Solana deposits.
+    Create accounting journal entry for Solana deposit.
+    
+    Double-entry bookkeeping:
     Debit: Crypto Assets - SOL (increase asset)
     Credit: User Liabilities - SOL (increase liability)
     """
     try:
-        amount_smallest_unit = transaction.amount_smallest_unit
+        from shared.crypto.price_utils import get_crypto_price
+        from shared.fiat.forex_service import ForexService
+        from decimal import Decimal
         
-        # Format amount for description
-        formatted_amount = AmountConverter.format_display_amount(amount_smallest_unit, "SOL")
-        
-        description = f"Solana deposit: {formatted_amount} for user {account.user_id}"
+        # Get current crypto price in USD and UGX at transaction time
+        try:
+            sol_price_usd = get_crypto_price("SOL")
+            if not sol_price_usd:
+                logger.warning("❌ Could not get SOL price in USD")
+                return
+            
+            # Get USD to UGX exchange rate
+            forex_service = ForexService()
+            usd_to_ugx = forex_service.get_exchange_rate('USD', 'UGX')
+            
+            sol_price_ugx = sol_price_usd * usd_to_ugx
+            
+            # Store price metadata in transaction
+            if not transaction.metadata_json:
+                transaction.metadata_json = {}
+            transaction.metadata_json.update({
+                "sol_price_usd_at_time": str(sol_price_usd),
+                "sol_price_ugx_at_time": str(sol_price_ugx),
+                "usd_to_ugx_rate_at_time": str(usd_to_ugx)
+            })
+            
+            logger.info(f"💰 SOL price at transaction time: ${sol_price_usd:.4f} USD, {sol_price_ugx:.2f} UGX")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to capture price at transaction time: {e}")
         
         # Use TradingAccountingService to create the journal entry
         accounting_service = TradingAccountingService(session_obj)
-        accounting_service.create_journal_entry(
-            description=description,
-            debit_account_name="Crypto Assets - SOL",
-            credit_account_name="User Liabilities - SOL",
-            amount_smallest_unit=amount_smallest_unit,
-            currency="SOL",
-            reference_id=transaction.reference_id,
-            metadata={
-                "transaction_id": transaction.id,
-                "account_id": account.id,
-                "user_id": account.user_id,
-                "blockchain_txid": transaction.blockchain_txid,
-                "address": transaction.address,
-                "transaction_type": transaction.type.value if transaction.type else None,
-                "unified_system": True,
-                "webhook_source": "solana_alchemy"
-            }
+        
+        # Get accounting accounts
+        crypto_account = accounting_service.get_account_by_name("Crypto Assets - SOL")
+        liability_account = accounting_service.get_account_by_name("User Liabilities - SOL")
+        
+        if not crypto_account or not liability_account:
+            logger.warning("⚠️ Required SOL accounting accounts not found - skipping accounting entry")
+            return
+        
+        # Format amount for description
+        formatted_amount = AmountConverter.format_display_amount(transaction.amount_smallest_unit, "SOL")
+        description = f"SOL deposit - {formatted_amount} (TX: {transaction.blockchain_txid[:8]}...)"
+        
+        # Create journal entry
+        journal_entry = JournalEntry(description=description)
+        accounting_service.session.add(journal_entry)
+        accounting_service.session.flush()  # Get the journal entry ID
+        
+        # Convert amount to standard units for accounting
+        amount_standard = AmountConverter.from_smallest_units(transaction.amount_smallest_unit, "SOL")
+        
+        # Deposit: Debit Crypto Assets, Credit User Liabilities
+        # Debit crypto assets (increase our crypto holdings)
+        debit_tx = LedgerTransaction(
+            journal_entry_id=journal_entry.id,
+            account_id=crypto_account.id,
+            debit=amount_standard,
+            credit=Decimal('0')
         )
-        logger.info(f"✅ Created accounting entry for Solana deposit: {formatted_amount}")
+        accounting_service.session.add(debit_tx)
+        
+        # Credit user liabilities (increase what we owe user)
+        credit_tx = LedgerTransaction(
+            journal_entry_id=journal_entry.id,
+            account_id=liability_account.id,
+            debit=Decimal('0'),
+            credit=amount_standard
+        )
+        accounting_service.session.add(credit_tx)
+        
+        logger.info(f"✅ Created ledger transactions for SOL deposit: {formatted_amount}")
+        
     except Exception as e:
-        logger.error(f"⚠️ Failed to create accounting entry for Solana deposit: {e}")
+        logger.error(f"❌ Failed to create accounting entry for Solana deposit: {e}")
 
 def _update_tx_confirmations_and_credit(tx_hash: str, required_confirmations: int = 32,tx_type: TransactionType = TransactionType.DEPOSIT, network: str | None = None) -> None:
     """Query Solana RPC for signature status, update confirmations, and credit on finality.
@@ -247,9 +307,36 @@ def handle_solana_address_activity(webhook_data: dict):
                     account_keys = message.get('account_keys', [])
                     instructions = message.get('instructions', [])
 
+                    # Compute transferred lamports using meta pre/post balances
+                    lamports = 0
                     from_address = ''
                     to_address = ''
-                    if account_keys and instructions:
+                    
+                    meta_container = (tx_entry.get('meta') or [{}])[0]
+                    pre_balances = meta_container.get('pre_balances') or []
+                    post_balances = meta_container.get('post_balances') or []
+
+                    # Find sender and recipient by analyzing balance changes
+                    if account_keys and pre_balances and post_balances:
+                        for i in range(min(len(account_keys), len(pre_balances), len(post_balances))):
+                            balance_change = int(post_balances[i]) - int(pre_balances[i])
+                            
+                            # Skip system accounts (balance = 1) and fee payer analysis
+                            if pre_balances[i] <= 1:
+                                continue
+                                
+                            if balance_change > 0:
+                                # This account received SOL (recipient)
+                                to_address = account_keys[i]
+                                lamports = balance_change
+                                logger.info(f"Found recipient: {to_address} received {balance_change} lamports")
+                            elif balance_change < 0 and not from_address:
+                                # This account sent SOL (sender) - exclude transaction fees
+                                from_address = account_keys[i]
+                                logger.info(f"Found sender: {from_address} sent {abs(balance_change)} lamports (including fees)")
+
+                    # Fallback: try instruction-based detection if balance analysis failed
+                    if not to_address and account_keys and instructions:
                         first_ix = instructions[0]
                         idxs = first_ix.get('accounts', [])
                         if isinstance(idxs, list) and len(idxs) >= 2:
@@ -258,28 +345,16 @@ def handle_solana_address_activity(webhook_data: dict):
                                 from_address = account_keys[from_idx]
                             if 0 <= to_idx < len(account_keys):
                                 to_address = account_keys[to_idx]
-
-                    # Compute transferred lamports using meta pre/post balances if available
-                    lamports = 0
-                    meta_container = (tx_entry.get('meta') or [{}])[0]
-                    pre_balances = meta_container.get('pre_balances') or []
-                    post_balances = meta_container.get('post_balances') or []
-
-                    # If we inferred to_idx above, prefer delta at to_idx
-                    if 'to_idx' in locals() and 0 <= to_idx < len(pre_balances) and 0 <= to_idx < len(post_balances):
-                        delta_to = int(post_balances[to_idx]) - int(pre_balances[to_idx])
-                        if delta_to > 0:
-                            lamports = delta_to
-                    # Fallback: try positive increase for any account other than program id (last)
-                    if lamports == 0 and pre_balances and post_balances:
-                        for i in range(min(len(pre_balances), len(post_balances))):
-                            inc = int(post_balances[i]) - int(pre_balances[i])
-                            if inc > 0:
-                                lamports = inc
-                                break
+                                
+                            # Try to get lamports from balance change at to_idx
+                            if 0 <= to_idx < len(pre_balances) and 0 <= to_idx < len(post_balances):
+                                delta_to = int(post_balances[to_idx]) - int(pre_balances[to_idx])
+                                if delta_to > 0:
+                                    lamports = delta_to
 
                     # Only process deposits into our monitored address (to_address)
                     if not to_address or lamports <= 0:
+                        logger.info(f"Invalid deposit {to_address} {lamports}")
                         continue
 
                     to_crypto_address = session.query(CryptoAddress).filter_by(
@@ -288,6 +363,7 @@ def handle_solana_address_activity(webhook_data: dict):
 
                     if not to_crypto_address:
                         # Not a monitored deposit; skip
+                        logger.info("Not a monitored address")
                         continue
 
                     # Check for existing transaction to avoid duplicates
@@ -310,7 +386,6 @@ def handle_solana_address_activity(webhook_data: dict):
                         type=TransactionType.DEPOSIT,
                         amount=float(amount_sol),  # Legacy field for backward compatibility
                         amount_smallest_unit=int(lamports),  # Unified field
-                        currency="SOL",  # Unified currency field
                         provider=PaymentProvider.CRYPTO,
                         blockchain_txid=tx_hash,
                         reference_id=f"sol_deposit_{tx_hash}",
@@ -325,7 +400,8 @@ def handle_solana_address_activity(webhook_data: dict):
                             'slot': webhook_data.get('event', {}).get('slot'),
                             'network': webhook_data.get('event', {}).get('network'),
                             'processed_at': datetime.datetime.utcnow().isoformat(),
-                            'unified_system': True
+                            'unified_system': True,
+                            'currency': 'SOL'
                         }
                     )
                     logger.info("created a deposit transaction")
@@ -365,11 +441,31 @@ def handle_solana_address_activity(webhook_data: dict):
                             )
 
                     session.add(transaction)
+                    
+                    # Get user_id before committing (while session is active)
+                    user_id = account.user_id if account else None
+                    
                     session.commit()
                     formatted_amount = AmountConverter.format_display_amount(lamports, "SOL")
                     logger.info(
                         f"✅ Recorded Solana deposit {tx_hash} for {to_address} amount {formatted_amount} ({lamports:,} lamports) and reserved funds"
                     )
+
+                    # Send websocket notification
+                    if solana_notification_service and user_id:
+                        try:
+                            logger.info(f"🔔 Attempting to send SOL deposit notification for user {user_id}")
+                            result = solana_notification_service.send_deposit_notification(
+                                user_id=user_id,
+                                transaction_hash=tx_hash,
+                                amount=amount_sol,
+                                wallet_address=to_address,
+                                slot=webhook_data.get('event', {}).get('slot'),
+                                confirmations=1
+                            )
+                            logger.info(f"🔔 SOL notification result: {result}")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to send SOL notification: {e}")
 
                     # Attempt to update confirmations and credit if finalized
                     _update_tx_confirmations_and_credit(tx_hash, required_confirmations=32, network=webhook_data.get('event', {}).get('network'))

@@ -13,6 +13,7 @@ from confluent_kafka import Consumer, KafkaError
 from decouple import config
 
 from shared.logger import setup_logging
+from shared.kafka_utils import KafkaTopicManager
 
 logger = setup_logging()
 
@@ -105,6 +106,16 @@ class EthereumAddressConsumer:
     def start_consuming(self):
         """Start consuming messages from Kafka"""
         try:
+            # Ensure the topic exists before creating consumer
+            logger.info(f"🔍 Ensuring Kafka topic '{self.topic}' exists...")
+            topic_manager = KafkaTopicManager(self.bootstrap_servers)
+            
+            if not topic_manager.create_topic(self.topic, num_partitions=1, replication_factor=1):
+                logger.error(f"❌ Failed to create/verify topic '{self.topic}'")
+                return
+            
+            logger.info(f"✅ Topic '{self.topic}' is ready")
+            
             self._create_consumer()
             self.consumer.subscribe([self.topic])
             self.is_running = True

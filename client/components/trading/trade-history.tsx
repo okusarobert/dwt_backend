@@ -1,17 +1,12 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { motion } from "framer-motion";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Loader2, ArrowUpRight, ArrowDownLeft } from "lucide-react";
-import { apiClient } from "@/lib/api-client";
+import React, { useState, useEffect } from 'react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { History, RefreshCw } from 'lucide-react';
+import { apiClient } from '@/lib/api-client';
+import { formatUGX, formatNumber } from '@/lib/currency-formatter';
 import { toast } from "react-hot-toast";
 
 interface Trade {
@@ -20,6 +15,7 @@ interface Trade {
   crypto_currency: string;
   crypto_amount: number;
   fiat_amount: number;
+  total_amount: number;
   status: string;
   created_at: string;
   completed_at?: string;
@@ -41,12 +37,18 @@ export function TradeHistory({ limit = 10 }: TradeHistoryProps) {
   const loadTradeHistory = async () => {
     try {
       setIsLoading(true);
-      const result = await apiClient.getTradeHistory(limit, 0);
-      setTrades(result.trades);
-      setTotal(result.total);
+      const response = await apiClient.getTradeHistory(limit, 0);
+      // Map the response data to include total_amount if missing
+      const mappedTrades = (response.trades || []).map((trade: any) => ({
+        ...trade,
+        total_amount: trade.total_amount || trade.fiat_amount || 0
+      }));
+      setTrades(mappedTrades);
+      setTotal(response.total || 0);
     } catch (error: any) {
       console.error('Failed to load trade history:', error);
       toast.error('Failed to load trade history');
+      setTrades([]);
     } finally {
       setIsLoading(false);
     }
@@ -76,91 +78,128 @@ export function TradeHistory({ limit = 10 }: TradeHistoryProps) {
 
   if (isLoading) {
     return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Trade History</CardTitle>
+      <Card className="shadow-sm">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base sm:text-lg">Trade History</CardTitle>
         </CardHeader>
         <CardContent className="flex items-center justify-center py-8">
-          <Loader2 className="w-6 h-6 animate-spin" />
+          <RefreshCw className="w-5 h-5 sm:w-6 sm:h-6 animate-spin" />
         </CardContent>
       </Card>
     );
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center justify-between">
-          Trade History
+    <Card className="shadow-sm">
+      <CardHeader className="pb-3">
+        <CardTitle className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <span className="text-base sm:text-lg">Trade History</span>
           {total > limit && (
-            <span className="text-sm text-muted-foreground">
+            <span className="text-xs sm:text-sm text-muted-foreground">
               Showing {trades.length} of {total}
             </span>
           )}
         </CardTitle>
       </CardHeader>
-      <CardContent>
+      <CardContent className="px-3 sm:px-6">
         {trades.length === 0 ? (
           <div className="text-center py-8 text-muted-foreground">
-            No trades yet. Start trading to see your history here.
+            <History className="w-12 h-12 mx-auto mb-3 opacity-50" />
+            <p className="text-sm">No trades yet</p>
+            <p className="text-xs mt-1">Start trading to see your history here</p>
           </div>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-2 sm:space-y-3">
             {trades.map((trade) => (
-              <motion.div
+              <div
                 key={trade.id}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="flex items-center justify-between p-4 border rounded-lg"
+                className="border rounded-lg p-3 sm:p-4"
               >
-                <div className="flex items-center gap-3">
-                  <div className={`p-2 rounded-full ${
-                    trade.type === 'buy' 
-                      ? 'bg-green-100 dark:bg-green-900' 
-                      : 'bg-red-100 dark:bg-red-900'
-                  }`}>
-                    {trade.type === 'buy' ? (
-                      <ArrowDownLeft className="w-4 h-4 text-green-600 dark:text-green-400" />
-                    ) : (
-                      <ArrowUpRight className="w-4 h-4 text-red-600 dark:text-red-400" />
-                    )}
-                  </div>
-                  <div>
-                    <div className="font-medium">
-                      {trade.type === 'buy' ? 'Buy' : 'Sell'} {trade.crypto_currency}
+                {/* Mobile Layout */}
+                <div className="sm:hidden">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <div className={`p-1.5 rounded-full ${
+                        trade.type === 'buy' 
+                          ? 'bg-green-100 dark:bg-green-900' 
+                          : 'bg-red-100 dark:bg-red-900'
+                      }`}>
+                        {trade.type === 'buy' ? (
+                          <History className="w-3 h-3 text-green-600 dark:text-green-400" />
+                        ) : (
+                          <RefreshCw className="w-3 h-3 text-red-600 dark:text-red-400" />
+                        )}
+                      </div>
+                      <span className="font-medium text-sm">
+                        {trade.type === 'buy' ? 'Buy' : 'Sell'} {trade.crypto_currency}
+                      </span>
                     </div>
-                    <div className="text-sm text-muted-foreground">
-                      {formatDate(trade.created_at)}
+                    <Badge className={`${getStatusColor(trade.status)} text-xs px-2 py-1`}>
+                      {trade.status}
+                    </Badge>
+                  </div>
+                  <div className="flex justify-between items-end">
+                    <div>
+                      <div className="text-xs text-muted-foreground">
+                        {formatDate(trade.created_at)}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        {formatNumber(trade.crypto_amount, 6)} {trade.crypto_currency}
+                      </div>
                     </div>
-                  </div>
-                </div>
-                
-                <div className="text-right">
-                  <div className="font-medium">
-                    {trade.type === 'buy' 
-                      ? `+${trade.crypto_amount.toFixed(8)} ${trade.crypto_currency}`
-                      : `+${trade.fiat_amount.toFixed(2)} UGX`
-                    }
-                  </div>
-                  <div className="text-sm text-muted-foreground">
-                    {trade.type === 'buy' 
-                      ? `-${trade.fiat_amount.toFixed(2)} UGX`
-                      : `-${trade.crypto_amount.toFixed(8)} ${trade.crypto_currency}`
-                    }
+                    <div className="text-right">
+                      <div className="font-semibold text-sm">
+                        {formatUGX(trade.total_amount)}
+                      </div>
+                    </div>
                   </div>
                 </div>
 
-                <Badge className={getStatusColor(trade.status)}>
-                  {trade.status}
-                </Badge>
-              </motion.div>
+                {/* Desktop Layout */}
+                <div className="hidden sm:flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-full ${
+                      trade.type === 'buy' 
+                        ? 'bg-green-100 dark:bg-green-900' 
+                        : 'bg-red-100 dark:bg-red-900'
+                    }`}>
+                      {trade.type === 'buy' ? (
+                        <History className="w-4 h-4 text-green-600 dark:text-green-400" />
+                      ) : (
+                        <RefreshCw className="w-4 h-4 text-red-600 dark:text-red-400" />
+                      )}
+                    </div>
+                    <div>
+                      <div className="font-medium">
+                        {trade.type === 'buy' ? 'Buy' : 'Sell'} {trade.crypto_currency}
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        {formatDate(trade.created_at)}
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div className="text-right">
+                    <div className="font-medium">
+                      {formatUGX(trade.total_amount)}
+                    </div>
+                    <div className="text-sm text-muted-foreground">
+                      {formatNumber(trade.crypto_amount, 8)} {trade.crypto_currency}
+                    </div>
+                  </div>
+
+                  <Badge className={getStatusColor(trade.status)}>
+                    {trade.status}
+                  </Badge>
+                </div>
+              </div>
             ))}
           </div>
         )}
         
         {total > limit && (
           <div className="text-center mt-4">
-            <Button variant="outline" onClick={loadTradeHistory}>
+            <Button variant="outline" size="sm" onClick={loadTradeHistory} className="text-sm">
               View All Trades
             </Button>
           </div>

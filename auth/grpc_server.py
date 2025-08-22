@@ -22,51 +22,60 @@ logger = setup_logging()
 
 class AuthServiceServicer(auth_pb2_grpc.AuthServiceServicer):
     def QRLogin(self, request, context):
-        user = session.query(User).filter_by(id=request.account_ref).first()
-        if not user:
-            context.set_code(grpc.StatusCode.NOT_FOUND)
-            context.set_details('Account not found')
-            return auth_pb2.QRLoginResponse(status="error")
-        # user = account.user
-        profile = user.profile
-        # Check if profile is complete (implement is_complete logic)
-        if not profile or not (profile.first_name and profile.last_name and profile.email and profile.phone_verified):
-            return auth_pb2.QRLoginResponse(status="incomplete_profile", user_id=str(user.id))
-        # TODO: Generate auth token/session
-        token = "dummy_token"  # Replace with real token logic
-        return auth_pb2.QRLoginResponse(status="success", user_id=str(user.id), token=token)
+        try:
+            user = session.query(User).filter_by(id=request.account_ref).first()
+            if not user:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details('Account not found')
+                return auth_pb2.QRLoginResponse(status="error")
+            # user = account.user
+            profile = user.profile
+            # Check if profile is complete (implement is_complete logic)
+            if not profile or not (profile.first_name and profile.last_name and profile.email and profile.phone_verified):
+                return auth_pb2.QRLoginResponse(status="incomplete_profile", user_id=str(user.id))
+            # TODO: Generate auth token/session
+            token = "dummy_token"  # Replace with real token logic
+            return auth_pb2.QRLoginResponse(status="success", user_id=str(user.id), token=token)
+        finally:
+            session.close()
 
     def CompleteProfile(self, request, context):
-        user = session.query(User).filter_by(id=request.user_id).first()
-        if not user:
-            context.set_code(grpc.StatusCode.NOT_FOUND)
-            context.set_details('User not found')
-            return auth_pb2.CompleteProfileResponse(status="error")
-        profile = user.profile
-        if not profile:
-            profile = Profile(user_id=user.id)
-            session.add(profile)
-        profile.first_name = request.first_name
-        profile.last_name = request.last_name
-        profile.email = request.email
-        profile.phone_verified = True  # Assume verified for demo
-        profile.country = "UG"
-        session.commit()
-        return auth_pb2.CompleteProfileResponse(status="profile_updated")
+        try:
+            user = session.query(User).filter_by(id=request.user_id).first()
+            if not user:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details('User not found')
+                return auth_pb2.CompleteProfileResponse(status="error")
+            profile = user.profile
+            if not profile:
+                profile = Profile(user_id=user.id)
+                session.add(profile)
+            profile.first_name = request.first_name
+            profile.last_name = request.last_name
+            profile.email = request.email
+            profile.phone_verified = True  # Assume verified for demo
+            profile.country = "UG"
+            session.commit()
+            return auth_pb2.CompleteProfileResponse(status="profile_updated")
+        finally:
+            session.close()
 
     def EmailLogin(self, request, context):
-        email = request.email
-        password = request.password
-        user = session.query(User).filter(User.email == email.lower()).first()
-        if not user:
-            context.set_code(grpc.StatusCode.UNAUTHENTICATED)
-            context.set_details('Invalid credentials')
-            return auth_pb2.EmailLoginResponse(token="")
-        # TODO: Add real password verification here
-        secret = config("JWT_SECRET")
-        payload = {"user_id": user.id, "email": user.email}  # No expiration
-        encoded = jwt.encode(payload, secret, algorithm="HS256")
-        return auth_pb2.EmailLoginResponse(token=encoded)
+        try:
+            email = request.email
+            password = request.password
+            user = session.query(User).filter(User.email == email.lower()).first()
+            if not user:
+                context.set_code(grpc.StatusCode.UNAUTHENTICATED)
+                context.set_details('Invalid credentials')
+                return auth_pb2.EmailLoginResponse(token="")
+            # TODO: Add real password verification here
+            secret = config("JWT_SECRET")
+            payload = {"user_id": user.id, "email": user.email}  # No expiration
+            encoded = jwt.encode(payload, secret, algorithm="HS256")
+            return auth_pb2.EmailLoginResponse(token=encoded)
+        finally:
+            session.close()
 
     def Register(self, request, context):
         from db.dto import RegisterDto, validate_registration
@@ -140,8 +149,9 @@ class AuthServiceServicer(auth_pb2_grpc.AuthServiceServicer):
         except Exception as e:
             logger.error(f"Error registering user: {e}")
             logger.error(traceback.format_exc())
-
-            return auth_pb2.RegisterResponse(status="error", error=str(errors))
+            return auth_pb2.RegisterResponse(status="error", error=str(e))
+        finally:
+            session.close()
 
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))

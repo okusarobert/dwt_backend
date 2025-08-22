@@ -80,13 +80,13 @@ class AccountType(enum.Enum):
     FIAT = "FIAT"
     CRYPTO = "CRYPTO"
 
-class Account(Timestamped, UnifiedBalanceMixin):
+class Account(Timestamped):
     __tablename__ = "accounts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     
-    # Legacy fiat amounts (kept for backward compatibility)
-    balance_legacy: Mapped[float] = mapped_column(Numeric(15, 2), nullable=False, default=0)
-    locked_amount_legacy: Mapped[float] = mapped_column(Numeric(15, 2), nullable=False, default=0)
+    # Legacy balance columns (required by database schema)
+    balance: Mapped[float] = mapped_column(Numeric(15, 2), nullable=False, default=0)
+    locked_amount: Mapped[float] = mapped_column(Numeric(15, 2), nullable=False, default=0)
     
     # Legacy crypto amounts (kept for backward compatibility)
     crypto_balance_smallest_unit: Mapped[int | None] = mapped_column(Numeric(78, 0), nullable=True)
@@ -95,12 +95,10 @@ class Account(Timestamped, UnifiedBalanceMixin):
     # Precision configuration for this account
     precision_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     
-    # Unified currency field (inherited from UnifiedBalanceMixin)
-    # currency: Mapped[str] = mapped_column(String(10), nullable=False) - inherited
-    # balance_smallest_unit: Mapped[int] = mapped_column(Numeric(78, 0), nullable=False, default=0) - inherited
-    # locked_amount_smallest_unit: Mapped[int] = mapped_column(Numeric(78, 0), nullable=False, default=0) - inherited
+    # Currency field (matches database schema)
+    currency: Mapped[str] = mapped_column(String(16), nullable=False)
     
-    account_type: Mapped[AccountType] = mapped_column(Enum(AccountType), nullable=False, default=AccountType.FIAT)
+    account_type: Mapped[AccountType] = mapped_column(Enum(AccountType, values_callable=lambda obj: [e.value for e in obj]), nullable=False, default=AccountType.FIAT)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey(
         "users.id", ondelete="CASCADE"), nullable=False, index=True)
     account_number: Mapped[str] = mapped_column(String(10), unique=True, index=True, nullable=False)
@@ -119,20 +117,9 @@ class Account(Timestamped, UnifiedBalanceMixin):
 
     user = relationship("User", back_populates="accounts")
     
-    # Legacy compatibility methods
-    @property
-    def balance(self) -> float:
-        """Legacy balance property for backward compatibility"""
-        return float(super().balance)
-    
-    @balance.setter
-    def balance(self, value: float):
-        """Legacy balance setter for backward compatibility"""
-        super(Account, self.__class__).balance.fset(self, value)
-    
     def available_balance(self) -> float:
-        """Get available balance using unified system"""
-        return float(super().available_balance)
+        """Get available balance (balance - locked_amount)"""
+        return float(self.balance - self.locked_amount)
 
 class Voucher(Timestamped):
     """Voucher system for UGX and USD payments"""
@@ -161,8 +148,8 @@ class Trade(Timestamped):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     
     # Trade details
-    trade_type: Mapped[TradeType] = mapped_column(Enum(TradeType), nullable=False)
-    status: Mapped[TradeStatus] = mapped_column(Enum(TradeStatus), nullable=False, default=TradeStatus.PENDING)
+    trade_type: Mapped[TradeType] = mapped_column(Enum(TradeType, values_callable=lambda obj: [e.value for e in obj]), nullable=False)
+    status: Mapped[TradeStatus] = mapped_column(Enum(TradeStatus, values_callable=lambda obj: [e.value for e in obj]), nullable=False, default=TradeStatus.PENDING)
     
     # User and account
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
@@ -171,7 +158,6 @@ class Trade(Timestamped):
     # Crypto details
     crypto_currency: Mapped[str] = mapped_column(String(10), nullable=False)  # BTC, ETH, etc.
     crypto_amount: Mapped[float] = mapped_column(Numeric(20, 8), nullable=False)
-    crypto_amount_smallest_unit: Mapped[int | None] = mapped_column(Numeric(78, 0), nullable=True)
     
     # Fiat details
     fiat_currency: Mapped[str] = mapped_column(String(3), nullable=False)  # UGX, USD, etc.
@@ -182,9 +168,15 @@ class Trade(Timestamped):
     fee_amount: Mapped[float] = mapped_column(Numeric(15, 2), nullable=True)
     fee_currency: Mapped[str] = mapped_column(String(3), nullable=True)
     
+    # Unified amount fields for precision system
+    crypto_amount_smallest_unit: Mapped[int | None] = mapped_column(Numeric(78, 0), nullable=True)
+    fiat_amount_smallest_unit: Mapped[int | None] = mapped_column(Numeric(78, 0), nullable=True)
+    fee_amount_smallest_unit: Mapped[int | None] = mapped_column(Numeric(78, 0), nullable=True)
+    precision_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    
     # Payment method
-    payment_method: Mapped[PaymentMethod] = mapped_column(Enum(PaymentMethod), nullable=False)
-    payment_provider: Mapped[PaymentProvider | None] = mapped_column(Enum(PaymentProvider), nullable=True)
+    payment_method: Mapped[PaymentMethod] = mapped_column(Enum(PaymentMethod, values_callable=lambda obj: [e.value for e in obj]), nullable=False)
+    payment_provider: Mapped[PaymentProvider | None] = mapped_column(Enum(PaymentProvider, values_callable=lambda obj: [e.value for e in obj]), nullable=True)
     
     # Payment details
     payment_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -194,15 +186,12 @@ class Trade(Timestamped):
     # Voucher details (if applicable)
     voucher_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("vouchers.id"), nullable=True)
     
-    # Mobile money details
-    phone_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    mobile_money_provider: Mapped[str | None] = mapped_column(String(20), nullable=True)  # MTN, Airtel, etc.
-    
-    # Bank deposit details
-    bank_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    account_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    account_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    deposit_reference: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Additional payment detail fields (now exist in database)
+    mobile_money_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    bank_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    account_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    account_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    deposit_reference: Mapped[str | None] = mapped_column(String(64), nullable=True)
     
     # Transaction references
     crypto_transaction_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("transactions.id"), nullable=True)
@@ -231,7 +220,7 @@ class Trade(Timestamped):
         Index('idx_trade_created_at', 'created_at'),
     )
 
-class Transaction(Timestamped, UnifiedAmountMixin):
+class Transaction(Timestamped):
     __tablename__ = "transactions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -240,9 +229,8 @@ class Transaction(Timestamped, UnifiedAmountMixin):
     # Legacy amount field (kept for backward compatibility)
     amount: Mapped[float] = mapped_column(Numeric(15, 2), nullable=False, default=0)
     
-    # Unified amount and currency fields inherited from UnifiedAmountMixin:
-    # amount_smallest_unit: Mapped[int] = mapped_column(Numeric(78, 0), nullable=False, default=0)
-    # currency: Mapped[str] = mapped_column(String(10), nullable=False)
+    # Unified amount field (currency comes from related account)
+    amount_smallest_unit: Mapped[int] = mapped_column(Numeric(78, 0), nullable=False, default=0)
     
     # Legacy precision config (kept for backward compatibility)
     precision_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -251,7 +239,7 @@ class Transaction(Timestamped, UnifiedAmountMixin):
     status: Mapped[TransactionStatus] = mapped_column(Enum(TransactionStatus), nullable=False, default=TransactionStatus.PENDING)
     description: Mapped[str] = mapped_column(String(255), nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSON, nullable=True)
-    provider: Mapped[PaymentProvider | None] = mapped_column(Enum(PaymentProvider), nullable=True, doc="Payment provider for this transaction")
+    provider: Mapped[PaymentProvider | None] = mapped_column(Enum(PaymentProvider, values_callable=lambda obj: [e.value for e in obj]), nullable=True, doc="Payment provider for this transaction")
     provider_reference: Mapped[str | None] = mapped_column(String(128), nullable=True, doc="Provider's transaction/reference ID")
     # Crypto-specific fields
     blockchain_txid = Column(String(128), nullable=True, index=True)
@@ -264,12 +252,20 @@ class Transaction(Timestamped, UnifiedAmountMixin):
     fee_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
     # Trade reference
     trade_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("trades.id"), nullable=True)
+    # Journal entry reference for accounting
+    journal_entry_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     account = relationship(
         "Account",
         back_populates="transactions",
         foreign_keys=[account_id]
     )
+    
+    @property
+    def currency(self):
+        """Get currency from the related account"""
+        return self.account.currency if self.account else None
+    
     fee_account = relationship(
         "Account",
         foreign_keys=[fee_account_id]

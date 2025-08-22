@@ -91,6 +91,19 @@ class AmountConverter:
         if currency not in CURRENCY_PRECISION:
             raise ValueError(f"Unsupported currency: {currency}")
         return CURRENCY_PRECISION[currency]
+
+def get_currency_info(currency: str) -> dict:
+    """Get currency information as a dictionary (for backward compatibility)"""
+    if currency not in CURRENCY_PRECISION:
+        return {'divisibility': 8}  # Default fallback
+    
+    config = CURRENCY_PRECISION[currency]
+    return {
+        'divisibility': config.decimal_places,
+        'smallest_unit_per_base': config.smallest_unit_per_base,
+        'currency_type': config.currency_type.value,
+        'smallest_unit_name': config.smallest_unit_name
+    }
     
     @staticmethod
     def validate_amount(amount: Decimal, currency: str) -> bool:

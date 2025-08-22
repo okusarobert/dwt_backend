@@ -40,11 +40,10 @@ export function AuthMiddleware({
     }
 
     // If user is authenticated and trying to access auth pages, redirect to dashboard
+    // EXCEPT for verify-email page - allow unverified users to stay there
     if (
       isAuthenticated &&
-      (pathname === "/auth/signin" ||
-        pathname === "/auth/signup" ||
-        pathname === "/auth/verify-email")
+      (pathname === "/auth/signin" || pathname === "/auth/signup")
     ) {
       setHasRedirected(true);
       router.push("/dashboard");

@@ -133,7 +133,7 @@ function SignUpContent() {
     setSuccessMessage("");
 
     try {
-      const success = await register({
+      const response = await register({
         email: data.email,
         phone_number: data.phone_number,
         first_name: data.first_name,
@@ -144,53 +144,27 @@ function SignUpContent() {
         country: data.country,
       });
 
-      console.log("Register method returned:", success);
-      console.log("Form values after register call:", form.getValues());
-
-      if (success) {
-        console.log("Registration successful");
+      console.log("Registration successful - user is now authenticated");
+      
+      // Check if response indicates verification is required
+      if (response.requires_verification && response.redirect) {
         setSuccessMessage(
           "Account created successfully! Please check your email for verification."
         );
         toast.success(
           "Account created successfully! Please check your email for verification."
         );
-
-        // Don't reset form - let user see their data was submitted
-        // form.reset();
-
-        // Redirect after a longer delay to show the success message
-        setTimeout(() => {
-          router.push("/auth/verify-email");
-        }, 3000);
+        
+        // Store email in localStorage for verification page
+        localStorage.setItem("signup_email", data.email);
+        
+        // Use window.location.href to avoid middleware race condition
+        window.location.href = response.redirect;
       } else {
-        console.log("Registration returned false");
-        toast.error("Registration failed. Please try again.");
-
-        // IMPORTANT: Preserve form data when registration returns false
-        // Only clear passwords for security, keep all other fields
-        form.setValue("password", "");
-        form.setValue("password_confirm", "");
-
-        // Ensure other fields retain their values
-        form.setValue("first_name", data.first_name);
-        form.setValue("last_name", data.last_name);
-        form.setValue("email", data.email);
-        form.setValue("phone_number", data.phone_number);
-        form.setValue("country", data.country);
-        form.setValue("sponsor_code", data.sponsor_code);
-        form.setValue("agreedToTerms", data.agreedToTerms);
-
-        console.log("Form data preserved after false return:", {
-          first_name: data.first_name,
-          last_name: data.last_name,
-          email: data.email,
-          phone_number: data.phone_number,
-          country: data.country,
-          sponsor_code: data.sponsor_code,
-          agreedToTerms: data.agreedToTerms,
-        });
-        console.log("Form values after preservation:", form.getValues());
+        // Fallback for unexpected response structure
+        setSuccessMessage("Account created successfully!");
+        toast.success("Account created successfully!");
+        router.push("/dashboard");
       }
     } catch (error: any) {
       console.error("Registration error:", error);
@@ -202,15 +176,30 @@ function SignUpContent() {
 
           // Map backend errors to form fields
           Object.entries(backendErrors).forEach(([key, value]) => {
-            if (typeof value === "string" && key in data) {
-              form.setError(key as keyof SignupFormData, {
-                type: "server",
-                message: value,
-              });
+            if (typeof value === "string") {
+              // Map backend field names to form field names
+              const fieldMapping: Record<string, keyof SignupFormData> = {
+                email: "email",
+                phone_number: "phone_number", 
+                first_name: "first_name",
+                last_name: "last_name",
+                password: "password",
+                password_confirm: "password_confirm",
+                country: "country",
+                sponsor_code: "sponsor_code"
+              };
+
+              const formFieldName = fieldMapping[key];
+              if (formFieldName) {
+                form.setError(formFieldName, {
+                  type: "server",
+                  message: value,
+                });
+              }
             }
           });
 
-          // Show first error as toast
+          // Show first error as toast for general feedback
           const firstError = Object.values(backendErrors)[0];
           if (typeof firstError === "string") {
             toast.error(firstError);

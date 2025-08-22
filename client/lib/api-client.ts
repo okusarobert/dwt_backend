@@ -25,7 +25,9 @@ export interface AuthResponse {
   message?: string;
   user?: User;
   token?: string;
-  // For registration, backend returns {"message": "User registered successfully"}
+  redirect?: string;
+  requires_verification?: boolean;
+  // For registration, backend returns user data with verification requirements
   // For login, backend returns user data
 }
 
@@ -105,9 +107,14 @@ class ApiClient {
     this.authClient.interceptors.response.use(
       (response) => response,
       async (error) => {
-      if (error.response?.status === 401) {
+        if (error.response?.status === 401) {
           // Clear auth state on 401
           await cookieAuth.removeAuthCookie();
+        } else if (error.response?.status === 403 && error.response?.data?.redirect === '/auth/verify-email') {
+          // Handle email verification required
+          console.log('Email verification required, redirecting...');
+          window.location.href = '/auth/verify-email';
+          return Promise.reject(new Error('Email verification required'));
         }
         return Promise.reject(error);
       }
@@ -119,8 +126,13 @@ class ApiClient {
         if (error.response?.status === 401) {
           // Clear auth state on 401
           await cookieAuth.removeAuthCookie();
-      }
-      return Promise.reject(error);
+        } else if (error.response?.status === 403 && error.response?.data?.redirect === '/auth/verify-email') {
+          // Handle email verification required
+          console.log('Email verification required, redirecting...');
+          window.location.href = '/auth/verify-email';
+          return Promise.reject(new Error('Email verification required'));
+        }
+        return Promise.reject(error);
       }
     );
   }
@@ -140,33 +152,18 @@ class ApiClient {
         userData
       );
 
-      // Backend returns {"message": "User registered successfully"} with status 201
-      // We need to handle this response format
-      if (response.status === 201) {
-        return {
-          message: response.data.message || "User registered successfully",
-          user: undefined, // No user data returned on registration
-        };
-      }
-
-    return response.data;
+      // Backend now returns user data with verification requirements
+      return response.data;
     } catch (error: any) {
       console.error("Registration failed:", error);
-
-      // Handle different error status codes
-      if (error.response?.status === 400) {
-        // Validation errors or bad request
-        if (error.response?.data && typeof error.response.data === "object") {
-          throw new Error(JSON.stringify(error.response.data));
-        }
-        throw new Error("Invalid registration data");
-      } else if (error.response?.status === 500) {
-        // Internal server error
-        throw new Error("Internal server error. Please try again later.");
-      } else {
-        // Other errors
-        throw new Error("Registration failed. Please try again.");
+      
+      // Handle validation errors
+      if (error.response?.status === 400 && error.response?.data) {
+        // Convert backend errors to a string for the form to parse
+        throw new Error(JSON.stringify(error.response.data));
       }
+      
+      throw error;
     }
   }
 
@@ -205,16 +202,35 @@ class ApiClient {
     }
   }
 
-  async getUserConfig(): Promise<{ user: User } | null> {
+  async getUserConfig(): Promise<User | null> {
     try {
-      const response: AxiosResponse<{ user: User }> = await this.authClient.get(
-        "/user-config"
-    );
-    return response.data;
+      const response: AxiosResponse<User> = await this.authClient.get("/user-config");
+      return response.data;
     } catch (error) {
       console.error("Failed to get user config:", error);
       return null;
     }
+  }
+
+  async getVerificationInfo(): Promise<{ email: string; verified: boolean }> {
+    const response = await this.authClient.get("/verification-info");
+    return response.data;
+  }
+
+  async verifyEmail(code: string, email: string): Promise<{ message: string }> {
+    const response: AxiosResponse<{ message: string }> = await this.authClient.post(
+      "/verify-email",
+      { code, email }
+    );
+    return response.data;
+  }
+
+  async resendVerification(email: string): Promise<{ message: string }> {
+    const response: AxiosResponse<{ message: string }> = await this.authClient.post(
+      "/resend-verification",
+      { email }
+    );
+    return response.data;
   }
 
   // Wallet-specific methods
@@ -228,10 +244,57 @@ class ApiClient {
     return response.data;
   }
 
-  async getTransactionHistory(limit = 5, offset = 0): Promise<any> {
+  async getTransactionHistory(
+    limit = 5, 
+    offset = 0, 
+    filters?: {
+      currency?: string;
+      status?: string;
+      type?: string;
+      date_from?: string;
+      date_to?: string;
+      search?: string;
+      sort_by?: string;
+      sort_order?: string;
+      page?: number;
+    }
+  ): Promise<any> {
+    const params: any = { limit, offset };
+    
+    if (filters) {
+      if (filters.currency) params.currency = filters.currency;
+      if (filters.status) params.status = filters.status;
+      if (filters.type) params.type = filters.type;
+      if (filters.date_from) params.date_from = filters.date_from;
+      if (filters.date_to) params.date_to = filters.date_to;
+      if (filters.search) params.search = filters.search;
+      if (filters.sort_by) params.sort_by = filters.sort_by;
+      if (filters.sort_order) params.sort_order = filters.sort_order;
+      if (filters.page) params.page = filters.page;
+    }
+    
     const response = await this.walletClient.get("/wallet/transactions", {
-      params: { limit, offset },
+      params,
     });
+    return response.data;
+  }
+
+  async getTransactionDetails(transactionId: number): Promise<any> {
+    const response = await this.walletClient.get(`/wallet/transactions/${transactionId}`);
+    return response.data;
+  }
+
+  async getUserPnL(currency?: string, periodDays: number = 1): Promise<any> {
+    const params = new URLSearchParams();
+    if (currency) params.append('currency', currency);
+    params.append('period_days', periodDays.toString());
+    
+    const response = await this.walletClient.get(`/wallet/pnl?${params}`);
+    return response.data;
+  }
+
+  async getPortfolioSummary(): Promise<any> {
+    const response = await this.walletClient.get('/wallet/portfolio-summary');
     return response.data;
   }
 
@@ -248,61 +311,39 @@ class ApiClient {
   }): Promise<{ success: boolean; data: User[]; pagination: { page: number; page_size: number; total: number } }> {
     // Map UI params to backend params
     const mapped: any = { ...(params || {}) };
-    if (mapped.q) {
-      mapped.email = mapped.q;
-      delete mapped.q;
+    if (mapped.blocked !== undefined) {
+      mapped.is_blocked = mapped.blocked;
+      delete mapped.blocked;
     }
-    if (mapped.role) {
-      mapped.role = String(mapped.role).toUpperCase();
+    if (mapped.deleted !== undefined) {
+      mapped.is_deleted = mapped.deleted;
+      delete mapped.deleted;
     }
 
-    const response = await this.adminClient.get("/admin/users", { params: mapped });
-    const data: any = response.data || {};
-    const items: User[] = Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
-    const page = typeof data?.page === "number" ? data.page : (params?.page ?? 1);
-    const page_size = typeof data?.page_size === "number" ? data.page_size : (params?.page_size ?? items.length ?? 0);
-    const total = typeof data?.total === "number" ? data.total : (Array.isArray(items) ? items.length : 0);
-    return { success: true, data: items, pagination: { page, page_size, total } };
+    const response = await this.adminClient.get("/admin/users", {
+      params: mapped,
+    });
+    return response.data;
   }
 
-  async adminGetUser(userId: number): Promise<{ success: boolean; data: User }> {
-    const response = await this.adminClient.get(`/admin/users/${userId}`);
-    return { success: true, data: response.data };
-  }
-
-  async adminUpdateUser(userId: number, patch: Partial<Pick<User,
-    | "first_name"
-    | "last_name"
-    | "phone_number"
-    | "role"
-    | "country"
-    | "ref_code"
-  >> & { blocked?: boolean; deleted?: boolean; default_currency?: string }): Promise<{ success: boolean; data: User }> {
-    const body: any = { ...(patch || {}) };
-    if (body.default_currency) {
-      body.currency = body.default_currency;
-      delete body.default_currency;
+  async adminUpdateUser(
+    userId: number,
+    body: {
+      first_name?: string;
+      last_name?: string;
+      email?: string;
+      phone?: string;
+      role?: string;
+      is_blocked?: boolean;
+      is_deleted?: boolean;
     }
+  ): Promise<{ success: boolean; data: User }> {
+    // Convert role to uppercase if provided
     if (body.role) {
       body.role = String(body.role).toUpperCase();
     }
     const response = await this.adminClient.patch(`/admin/users/${userId}`, body);
     return { success: true, data: response.data };
-  }
-
-  // ===== PORTFOLIO ENDPOINTS =====
-  
-  /**
-   * Get portfolio summary for the authenticated user
-   */
-  async getPortfolioSummary() {
-    try {
-      const response = await this.walletClient.get('/wallet/portfolio/summary');
-      return response.data;
-    } catch (error) {
-      console.error('Error fetching portfolio summary:', error);
-      throw error;
-    }
   }
 
   // =============================
@@ -426,6 +467,109 @@ class ApiClient {
     return response.data;
   }
 
+  // Get crypto balances for user (now with aggregation)
+  async getCryptoBalances(): Promise<{
+    balances: Record<string, any>;
+    total_value_ugx: number;
+    total_value_usd: number;
+    portfolio_breakdown?: Record<string, any>;
+  }> {
+    const response = await this.walletClient.get('/wallet/crypto/balances');
+    return response.data;
+  }
+
+  // Get detailed crypto balances with multi-chain aggregation
+  async getDetailedCryptoBalances(): Promise<{
+    aggregated_balances: Record<string, {
+      total_balance: number;
+      addresses: Array<{
+        address: string;
+        chain: string;
+        currency: string;
+        memo?: string;
+      }>;
+      chains: Record<string, {
+        balance: number;
+        accounts: Array<{
+          account_id: number;
+          balance: number;
+          currency: string;
+          parent_currency?: string;
+        }>;
+      }>;
+    }>;
+    balance_summary: {
+      total_currencies: number;
+      currencies: Record<string, {
+        balance: number;
+        chain_count: number;
+      }>;
+      multi_chain_tokens: Record<string, {
+        total_balance: number;
+        chains: Record<string, number>;
+      }>;
+    };
+    portfolio_value: {
+      total_value_usd: number;
+      total_value_target: number;
+      target_currency: string;
+      currencies: Record<string, {
+        balance: number;
+        price_usd: number;
+        value_usd: number;
+        chains: Record<string, any>;
+      }>;
+    };
+    multi_chain_details: Record<string, any>;
+    success: boolean;
+  }> {
+    const response = await this.walletClient.get('/wallet/crypto/balances/detailed');
+    return response.data;
+  }
+
+  // Generate deposit address for crypto
+  async generateDepositAddress(crypto: string): Promise<{
+    address: string;
+    memo?: string;
+    qr_code?: string;
+  }> {
+    const response = await this.walletClient.post(`/wallet/crypto/${crypto.toLowerCase()}/deposit/address`);
+    return response.data;
+  }
+
+  // Withdraw crypto to external address
+  async withdrawCrypto(crypto: string, amount: number, address: string): Promise<{
+    message: string;
+    transaction_id?: string;
+  }> {
+    const response = await this.walletClient.post(`/wallet/crypto/${crypto.toLowerCase()}/withdraw`, {
+      amount,
+      address,
+    });
+    return response.data;
+  }
+
+  // Get current crypto prices
+  async getCryptoPrices(): Promise<Record<string, {
+    price_ugx: number;
+    change_24h: number;
+    last_updated: string;
+  }>> {
+    const response = await this.walletClient.get('/api/trading/prices');
+    return response.data;
+  }
+
+  // Get USD to UGX exchange rate
+  async getUsdToUgxRate(): Promise<number> {
+    try {
+      const response = await this.walletClient.get('/api/trading/exchange-rate/USD/UGX');
+      return response.data.rate || 3700; // Fallback rate
+    } catch (error) {
+      console.warn('Failed to get USD to UGX rate, using fallback');
+      return 3700; // Fallback rate ~3700 UGX per USD
+    }
+  }
+
   // Trading endpoints
   async calculateTrade(
     tradeType: 'buy' | 'sell',
@@ -439,9 +583,12 @@ class ApiClient {
     total_cost?: number;
     net_proceeds?: number;
   }> {
-    const response = await this.walletClient.post(`/api/trading/${tradeType}/calculate`, {
+    const response = await this.walletClient.post('/api/trading/calculate', {
       crypto_currency: cryptoCurrency,
-      amount: amount
+      fiat_currency: 'UGX',
+      amount: amount,
+      trade_type: tradeType,
+      payment_method: 'mobile_money'
     });
     return response.data;
   }
@@ -481,6 +628,23 @@ class ApiClient {
     const response = await this.walletClient.get('/api/trading/history', {
       params: { limit, offset }
     });
+    return response.data;
+  }
+
+  // Get trade by ID
+  async getTrade(tradeId: string): Promise<{
+    id: string;
+    type: 'buy' | 'sell';
+    crypto_currency: string;
+    crypto_amount: number;
+    fiat_amount: number;
+    status: string;
+    created_at: string;
+    completed_at?: string;
+    payment_url?: string;
+    phone_number?: string;
+  }> {
+    const response = await this.walletClient.get(`/api/trading/${tradeId}`);
     return response.data;
   }
 }

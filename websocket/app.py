@@ -23,6 +23,7 @@ from multiprocessing import Process
 from confluent_kafka.admin import AdminClient, NewTopic
 import redis
 from crypto_price_service import CryptoPriceService
+from redis_notification_handler import get_redis_notification_handler
 
 # Set up logging first
 logger = logging.getLogger('websocket')
@@ -51,7 +52,19 @@ except:
     logger.warning("Using default secret key - change in production")
 
 app.config['SECRET_KEY'] = secret_key
-socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*", message_queue='redis://redis:6379')
+socketio = SocketIO(
+    app, 
+    async_mode='eventlet', 
+    cors_allowed_origins="*", 
+    message_queue='redis://redis:6379',
+    ping_timeout=60,
+    ping_interval=25,
+    logger=True,
+    engineio_logger=True
+)
+
+# Initialize Redis notification handler
+notification_handler = get_redis_notification_handler(socketio)
 
 @app.route('/health')
 def health_check():
@@ -254,6 +267,13 @@ def start_background_tasks():
         logger.error(f"BOOT: Failed to start Redis listener thread: {e}")
     
     try:
+        logger.info("BOOT: Starting Redis notification handler in background...")
+        socketio.start_background_task(target=notification_handler.start_consumer)
+        logger.info("BOOT: Redis notification handler background task started")
+    except Exception as e:
+        logger.error(f"BOOT: Failed to start Redis notification handler: {e}")
+    
+    try:
         socketio.start_background_task(target=heartbeat)
         logger.info("BOOT: Heartbeat task started")
     except Exception as e:
@@ -284,13 +304,12 @@ except Exception as e:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def verify_token(token):
-    """Verify JWT token and return user"""
+def get_user_from_token(token):
+    session = None
     try:
         payload = jwt.decode(token, config('SECRET_KEY', default='your-secret-key'), algorithms=['HS256'])
         session = get_session()
         user = session.query(User).filter(User.id == payload['user_id']).first()
-        session.close()
         return user
     except jwt.ExpiredSignatureError:
         return None
@@ -299,6 +318,13 @@ def verify_token(token):
     except Exception as e:
         logger.error(f"Error verifying token: {e}")
         return None
+    finally:
+        if session:
+            session.close()
+
+def verify_token(token):
+    """Verify JWT token and return user"""
+    return get_user_from_token(token)
 
 @socketio.on('connect')
 def handle_connect():
@@ -484,10 +510,87 @@ def websocket_status():
         logger.error(f"Error getting WebSocket status: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+# WebSocket event handlers for notifications
+@socketio.on('connect')
+def handle_connect(auth):
+    """Handle client connection"""
+    try:
+        # Extract user info from auth token
+        if auth and 'token' in auth:
+            token = auth['token']
+            try:
+                # Decode JWT token to get user_id
+                payload = jwt.decode(token, secret_key, algorithms=['HS256'])
+                user_id = payload.get('user_id')
+                
+                if user_id:
+                    # Register user connection with notification handler
+                    notification_handler.user_connected(request.sid, user_id)
+                    logger.info(f"User {user_id} connected for notifications")
+                    emit('connection_status', {'status': 'connected', 'user_id': user_id})
+                else:
+                    logger.warning("No user_id in token payload")
+                    
+            except jwt.InvalidTokenError:
+                logger.warning("Invalid JWT token provided")
+        else:
+            logger.info("Client connected without authentication")
+            
+    except Exception as e:
+        logger.error(f"Error handling connection: {e}")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Handle client disconnection"""
+    try:
+        notification_handler.user_disconnected(request.sid)
+        logger.info(f"Client {request.sid} disconnected")
+    except Exception as e:
+        logger.error(f"Error handling disconnection: {e}")
+
+@socketio.on('join_notifications')
+def handle_join_notifications(data):
+    """Handle user joining notification room"""
+    try:
+        logger.info(f"🔔 join_notifications event received: {data}")
+        user_id = data.get('user_id')
+        if user_id:
+            logger.info(f"🔔 Registering user {user_id} with session {request.sid}")
+            notification_handler.user_connected(request.sid, user_id)
+            emit('joined_notifications', {'user_id': user_id})
+            logger.info(f"🔔 User {user_id} successfully joined notifications")
+        else:
+            logger.warning(f"🔔 No user_id provided in join_notifications: {data}")
+    except Exception as e:
+        logger.error(f"🔔 Error joining notifications: {e}")
+        import traceback
+        logger.error(f"🔔 Full traceback: {traceback.format_exc()}")
+
+@socketio.on('mark_notification_read')
+def handle_mark_read(data):
+    """Handle marking notification as read"""
+    try:
+        notification_id = data.get('notification_id')
+        user_id = data.get('user_id')
+        # Here you could update notification status in database
+        logger.info(f"Notification {notification_id} marked as read by user {user_id}")
+        emit('notification_read', {'notification_id': notification_id})
+    except Exception as e:
+        logger.error(f"Error marking notification as read: {e}")
+
 if __name__ == '__main__':
     try:
         logger.info("BOOT: Starting Flask-SocketIO server...")
+        
+        # Start SocketIO server first
+        # socketio.start_background_task(target=lambda: notification_handler.start_consumer())
+        # logger.info("BOOT: Notification handler will start in background")
+        
         socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False)
     except Exception as e:
         logger.error(f"BOOT: Failed to start server: {e}")
         sys.exit(1)
+    # finally:
+    #     # Clean shutdown
+    #     if notification_handler:
+    #         notification_handler.stop_consumer()

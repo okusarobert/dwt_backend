@@ -13,7 +13,7 @@ interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<boolean>;
-  register: (userData: any) => Promise<boolean>;
+  register: (userData: any) => Promise<any>;
   logout: () => void;
   isAuthenticated: boolean;
 }
@@ -47,13 +47,33 @@ export function AuthProvider({ children }: AuthProviderProps) {
           // If authenticated, get fresh user data from server
           try {
             const userConfig = await apiClient.getUserConfig();
-            if (userConfig && userConfig.user) {
-              setUser(userConfig.user);
+            if (userConfig) {
+              setUser(userConfig);
             }
-          } catch (error) {
+          } catch (error: any) {
             console.error("Failed to fetch user data:", error);
-            // If we can't get user data, clear auth state
-            setUser(null);
+            // If 403 (email verification required), user is authenticated but needs verification
+            if (error.response?.status === 403) {
+              // Try to get user info from verification endpoint
+              try {
+                const verificationInfo = await apiClient.getVerificationInfo();
+                if (verificationInfo) {
+                  setUser({
+                    id: 0, // Will be updated when verification completes
+                    email: verificationInfo.email,
+                    first_name: "",
+                    last_name: "",
+                    role: "user"
+                  });
+                }
+              } catch (verifyError) {
+                console.error("Failed to get verification info:", error);
+                setUser(null);
+              }
+            } else {
+              // Other errors mean not authenticated
+              setUser(null);
+            }
           }
         } else {
           // Not authenticated, clear user state
@@ -89,23 +109,21 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
   };
 
-  const register = async (userData: any): Promise<boolean> => {
-    try {
-      // Don't set global loading state for registration
-      // This prevents form state loss during the request
-      // setIsLoading(true);
+  const register = async (userData: any): Promise<any> => {
+    // Don't set global loading state for registration
+    // This prevents form state loss during the request
+    // setIsLoading(true);
 
-      const response = await apiClient.register(userData);
+    const response = await apiClient.register(userData);
 
-      // Backend returns {"message": "User registered successfully"} with status 201
-      // No user data is returned, so we consider it successful if we get here
-      // The user will need to verify their email before they can log in
-      return true;
-    } catch (error) {
-      console.error("Registration failed:", error);
-      return false;
+    // Backend now returns user data with verification requirements
+    // Set user state immediately after successful registration
+    if (response.user) {
+      setUser(response.user);
     }
-    // No finally block needed since we're not setting global loading state
+    
+    // Return the response so the form can handle verification redirects
+    return response;
   };
 
   const logout = async () => {

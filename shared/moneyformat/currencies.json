@@ -301,7 +301,7 @@
   },
   "ETH": {
     "name": "Ethereum",
-    "divisibility": 8,
+    "divisibility": 18,
     "crypto": true
   },
   "BNB": {

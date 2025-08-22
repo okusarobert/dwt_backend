@@ -18,6 +18,8 @@ from decimal import Decimal
 
 import websocket
 import requests
+from shared.crypto.price_utils import get_crypto_price
+from shared.fiat.forex_service import forex_service
 from sqlalchemy.orm import Session
 from decouple import config
 from requests.adapters import HTTPAdapter
@@ -28,16 +30,25 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared'))
 
 from shared.logger import setup_logging
-from db.connection import session
+from db.connection import get_session
 from db.wallet import CryptoAddress, Transaction, Account, PaymentProvider, TransactionType, TransactionStatus, Reservation, ReservationType
 from shared.crypto.clients.eth import ETHWallet, EthereumConfig
 from shared.currency_precision import AmountConverter
 from shared.trading_accounting import TradingAccountingService
 from db.accounting import JournalEntry, LedgerTransaction, AccountingAccount
 from kafka_consumer import start_ethereum_address_consumer, stop_ethereum_address_consumer
+from shared.notification_service import notification_service
 import traceback
 
 logger = setup_logging()
+
+# Import ETH notification service
+try:
+    from notification_integration import eth_notification_service
+    logger.info("✅ Successfully imported eth_notification_service")
+except ImportError as e:
+    logger.error(f"❌ Failed to import eth_notification_service: {e}")
+    eth_notification_service = None
 
 
 @dataclass
@@ -369,6 +380,7 @@ class AlchemyWebSocketClient:
     
     async def _is_transaction_processed(self, tx_hash: str) -> bool:
         """Check if transaction has already been processed"""
+        session = get_session()
         try:
             existing_tx = session.query(Transaction).filter_by(
                 blockchain_txid=tx_hash
@@ -377,9 +389,12 @@ class AlchemyWebSocketClient:
         except Exception as e:
             logger.error(f"❌ Error checking transaction status: {e}")
             return False
+        finally:
+            session.close()
     
     def _get_crypto_address(self, address: str) -> Optional[CryptoAddress]:
         """Get crypto address record from database (case-insensitive)"""
+        session = get_session()
         try:
             # Use case-insensitive lookup
             return session.query(CryptoAddress).filter(
@@ -389,9 +404,12 @@ class AlchemyWebSocketClient:
         except Exception as e:
             logger.error(f"❌ Error getting crypto address: {e}")
             return None
+        finally:
+            session.close()
     
     async def _create_transaction_record(self, event: TransactionEvent, crypto_address: CryptoAddress):
         """Create a new transaction record"""
+        session = get_session()
         try:
             # Determine transaction type
             tx_type = TransactionType.DEPOSIT if event.to_address.lower() in self.monitored_addresses else TransactionType.TRANSFER
@@ -428,9 +446,12 @@ class AlchemyWebSocketClient:
         except Exception as e:
             logger.error(f"❌ Error creating transaction record: {e}")
             session.rollback()
+        finally:
+            session.close()
     
     async def _update_account_balance(self, account_id: int, amount: Decimal):
         """Update account balance"""
+        session = get_session()
         try:
             account = session.query(Account).filter_by(id=account_id).first()
             if account:
@@ -440,22 +461,50 @@ class AlchemyWebSocketClient:
         except Exception as e:
             logger.error(f"❌ Error updating account balance: {e}")
             session.rollback()
+        finally:
+            session.close()
     
     async def _send_notification(self, event: TransactionEvent, crypto_address: CryptoAddress):
         """Send notification about new transaction"""
         try:
-            # You can integrate with your notification system here
-            # For example, send to Kafka, WebSocket, or email
-            notification_data = {
-                "type": "new_ethereum_transaction",
-                "account_id": crypto_address.account_id,
-                "address": crypto_address.address,
-                "tx_hash": event.tx_hash,
-                "amount": str(event.value),
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            logger.info(f"📢 Notification sent for transaction {event.tx_hash}")
+            # Get account details for user_id
+            session = get_session()
+            try:
+                account = session.query(Account).filter_by(id=crypto_address.account_id).first()
+                if not account:
+                    logger.warning(f"Account not found for crypto address: {crypto_address.address}")
+                    return
+                
+                # Calculate USD and UGX values using real-time prices
+                try:
+                    eth_price_usd = Decimal(str(get_crypto_price('ETH') or 2000))  # Fallback to 2000
+                    usd_to_ugx_rate = Decimal(str(forex_service.get_exchange_rate('usd', 'ugx')))
+                except Exception as e:
+                    logger.warning(f"Failed to get live prices, using fallbacks: {e}")
+                    eth_price_usd = Decimal('2000')  # Fallback ETH price
+                    usd_to_ugx_rate = Decimal('3700')  # Fallback exchange rate
+                
+                amount_usd = event.value * eth_price_usd
+                amount_ugx = amount_usd * usd_to_ugx_rate
+                
+                # Send deposit notification
+                notification_service.send_deposit_notification(
+                    user_id=account.user_id,
+                    transaction_hash=event.tx_hash,
+                    crypto_symbol='ETH',
+                    amount=event.value,
+                    amount_usd=amount_usd,
+                    amount_ugx=amount_ugx,
+                    wallet_address=event.to_address,
+                    block_number=event.block_number,
+                    confirmations=0,  # Initial confirmation count
+                    status='pending'
+                )
+                
+                logger.info(f"📢 Deposit notification sent for user {account.user_id}: {event.value} ETH")
+                
+            finally:
+                session.close()
             
         except Exception as e:
             logger.error(f"❌ Error sending notification: {e}")
@@ -482,7 +531,7 @@ class AlchemyWebSocketClient:
                 sender_crypto_address = self._get_crypto_address(event.from_address.lower())
                 if sender_crypto_address:
                     self._create_transaction_record_sync(event, sender_crypto_address, is_withdrawal=True)
-                    self._send_notification_sync(event, sender_crypto_address)
+                    self._send_withdrawal_notification_sync(event, sender_crypto_address)
                 else:
                     logger.warning(f"⚠️ No crypto address found for sender: {event.from_address}")
                 
@@ -490,7 +539,7 @@ class AlchemyWebSocketClient:
                 recipient_crypto_address = self._get_crypto_address(event.to_address.lower())
                 if recipient_crypto_address:
                     self._create_transaction_record_sync(event, recipient_crypto_address, is_withdrawal=False)
-                    self._send_notification_sync(event, recipient_crypto_address)
+                    self._send_deposit_notification_sync(event, recipient_crypto_address)
                 else:
                     logger.warning(f"⚠️ No crypto address found for recipient: {event.to_address}")
                 
@@ -522,8 +571,11 @@ class AlchemyWebSocketClient:
                 logger.warning(f"⚠️ Transaction {event.tx_hash} doesn't involve monitored addresses")
                 return
             
-            # Send notification
-            self._send_notification_sync(event, crypto_address)
+            # Send notification based on transaction type
+            if is_incoming:
+                self._send_notification_sync(event, crypto_address)
+            elif is_outgoing:
+                self._send_withdrawal_notification_sync(event, crypto_address)
             
             logger.info(f"✅ Transaction {event.tx_hash} processed successfully")
             logger.info(f"   Type: {'Incoming' if is_incoming else 'Outgoing'}")
@@ -533,14 +585,104 @@ class AlchemyWebSocketClient:
         except Exception as e:
             logger.error(f"❌ Error processing transaction {event.tx_hash}: {e}")
         finally:
-            # Prevent long-lived sessions that can lock tables
+            # Session cleanup is handled by individual methods now
+            pass
+    
+    def _send_notification_sync(self, event: TransactionEvent, crypto_address: CryptoAddress):
+        """Send deposit notification synchronously"""
+        try:
+            # Get account details for user_id
+            session = get_session()
             try:
-                session.remove()
-            except Exception:
-                pass
+                account = session.query(Account).filter_by(id=crypto_address.account_id).first()
+                if not account:
+                    logger.warning(f"Account not found for crypto address: {crypto_address.address}")
+                    return
+                
+                # Calculate USD and UGX values using real-time prices
+                try:
+                    eth_price_usd = Decimal(str(get_crypto_price('ETH') or 2000))  # Fallback to 2000
+                    usd_to_ugx_rate = Decimal(str(forex_service.get_exchange_rate('usd', 'ugx')))
+                except Exception as e:
+                    logger.warning(f"Failed to get live prices, using fallbacks: {e}")
+                    eth_price_usd = Decimal('2000')  # Fallback ETH price
+                    usd_to_ugx_rate = Decimal('3700')  # Fallback exchange rate
+                
+                amount_usd = event.value * eth_price_usd
+                amount_ugx = amount_usd * usd_to_ugx_rate
+                
+                # Send deposit notification
+                notification_service.send_deposit_notification(
+                    user_id=account.user_id,
+                    transaction_hash=event.tx_hash,
+                    crypto_symbol='ETH',
+                    amount=event.value,
+                    amount_usd=amount_usd,
+                    amount_ugx=amount_ugx,
+                    wallet_address=event.to_address,
+                    block_number=event.block_number,
+                    confirmations=0,
+                    status='pending'
+                )
+                
+                logger.info(f"📢 Deposit notification sent for user {account.user_id}: {event.value} ETH")
+                
+            finally:
+                session.close()
+            
+        except Exception as e:
+            logger.error(f"❌ Error sending deposit notification: {e}")
+    
+    def _send_deposit_notification_sync(self, event: TransactionEvent, crypto_address: CryptoAddress):
+        """Send deposit notification synchronously"""
+        self._send_notification_sync(event, crypto_address)
+    
+    def _send_withdrawal_notification_sync(self, event: TransactionEvent, crypto_address: CryptoAddress):
+        """Send withdrawal notification synchronously"""
+        try:
+            # Get account details for user_id
+            session = get_session()
+            try:
+                account = session.query(Account).filter_by(id=crypto_address.account_id).first()
+                if not account:
+                    logger.warning(f"Account not found for crypto address: {crypto_address.address}")
+                    return
+                
+                # Calculate USD and UGX values using real-time prices
+                try:
+                    eth_price_usd = Decimal(str(get_crypto_price('ETH') or 2000))  # Fallback to 2000
+                    usd_to_ugx_rate = Decimal(str(forex_service.get_exchange_rate('usd', 'ugx')))
+                except Exception as e:
+                    logger.warning(f"Failed to get live prices, using fallbacks: {e}")
+                    eth_price_usd = Decimal('2000')  # Fallback ETH price
+                    usd_to_ugx_rate = Decimal('3700')  # Fallback exchange rate
+                
+                amount_usd = event.value * eth_price_usd
+                amount_ugx = amount_usd * usd_to_ugx_rate
+                
+                # Send withdrawal notification
+                notification_service.send_withdrawal_notification(
+                    user_id=account.user_id,
+                    transaction_hash=event.tx_hash,
+                    crypto_symbol='ETH',
+                    amount=event.value,
+                    amount_usd=amount_usd,
+                    amount_ugx=amount_ugx,
+                    destination_address=event.to_address,
+                    status='pending'
+                )
+                
+                logger.info(f"📢 Withdrawal notification sent for user {account.user_id}: {event.value} ETH")
+                
+            finally:
+                session.close()
+            
+        except Exception as e:
+            logger.error(f"❌ Error sending withdrawal notification: {e}")
     
     def _is_transaction_processed_sync(self, tx_hash: str, address: str = None, tx_type: TransactionType = TransactionType.DEPOSIT) -> bool:
         """Check if transaction has already been processed for a specific address (synchronous)"""
+        session = get_session()
         try:
             if address:
                 # Check if this specific address already has a transaction record for this hash
@@ -559,9 +701,12 @@ class AlchemyWebSocketClient:
         except Exception as e:
             logger.error(f"❌ Error checking transaction status: {e}")
             return False
+        finally:
+            session.close()
     
     def _create_transaction_record_sync(self, event: TransactionEvent, crypto_address: CryptoAddress, is_withdrawal: bool = False):
         """Create a new transaction record and lock the amount (synchronous)"""
+        session = get_session()
         try:
             # Determine transaction type based on is_withdrawal parameter or by checking addresses
             if is_withdrawal:
@@ -583,13 +728,16 @@ class AlchemyWebSocketClient:
                     tx_type = TransactionType.TRANSFER
                     address_field = event.to_address.lower()
             
-            # Check for existing transaction first (with session refresh to avoid stale data)
-            session.flush()  # Ensure any pending changes are flushed
-            existing_tx = session.query(Transaction).filter_by(
-                blockchain_txid=event.tx_hash,
-                address=address_field,
-                type=tx_type
-            ).first()
+            # Check for existing transaction first (with fresh session to avoid stale data)
+            check_session = get_session()
+            try:
+                existing_tx = check_session.query(Transaction).filter_by(
+                    blockchain_txid=event.tx_hash,
+                    address=address_field,
+                    type=tx_type
+                ).first()
+            finally:
+                check_session.close()
             
             if existing_tx:
                 logger.info(f"⏭️ Transaction {event.tx_hash} already exists for {address_field} ({tx_type})")
@@ -634,15 +782,24 @@ class AlchemyWebSocketClient:
             
             session.add(transaction)
             
+            # Get session-bound crypto address for proper relationship access
+            session_crypto_address = session.query(CryptoAddress).filter_by(id=crypto_address.id).first()
+            if not session_crypto_address:
+                logger.error(f"❌ Could not find crypto address {crypto_address.id} in session")
+                return
+            
             # Create accounting journal entry
             try:
                 accounting_service = TradingAccountingService(session)
-                self._create_accounting_entry(transaction, event, crypto_address, accounting_service, tx_type == TransactionType.WITHDRAWAL)
+                self._create_accounting_entry(transaction, event, session_crypto_address, accounting_service, tx_type == TransactionType.WITHDRAWAL)
             except Exception as e:
                 logger.error(f"⚠️ Failed to create accounting entry: {e}")
             
             # Lock the amount by creating a reservation
-            self._create_reservation_sync(crypto_address.account_id, amount_wei, event.tx_hash)
+            self._create_reservation_sync(session, session_crypto_address.account_id, amount_wei, event.tx_hash)
+            
+            # Get user_id before committing (while session is active)
+            user_id = session_crypto_address.account.user_id
             
             try:
                 session.commit()
@@ -651,8 +808,23 @@ class AlchemyWebSocketClient:
                 logger.info(f"   Amount: {AmountConverter.format_display_amount(amount_wei, 'ETH')}")
                 logger.info(f"   Account: {crypto_address.account_id}")
                 
-                # Notify via Kafka
-                self._send_transaction_notification(transaction)
+                # Send websocket notification
+                if eth_notification_service and tx_type == TransactionType.DEPOSIT:
+                    try:
+                        logger.info(f"🔔 Attempting to send ETH deposit notification for user {user_id}")
+                        result = eth_notification_service.send_deposit_notification(
+                            user_id=user_id,
+                            transaction_hash=event.tx_hash,
+                            amount=event.value,
+                            wallet_address=address_field,
+                            block_number=event.block_number,
+                            confirmations=event.confirmations
+                        )
+                        logger.info(f"🔔 ETH notification result: {result}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to send ETH notification: {e}")
+                
+                # Transaction saved successfully - notification already sent above
                 
             except Exception as e:
                 session.rollback()
@@ -674,10 +846,39 @@ class AlchemyWebSocketClient:
         except Exception as e:
             logger.error(f"❌ Error creating transaction record: {e}")
             session.rollback()
+        finally:
+            session.close()
     
     def _create_accounting_entry(self, transaction: Transaction, event, crypto_address: CryptoAddress, accounting_service: TradingAccountingService, is_withdrawal: bool):
         """Create accounting journal entry for the transaction"""
+        # Note: session is passed via accounting_service, no need to create new session
         try:
+            # Import AmountConverter at the top of the function
+            from shared.currency_precision import AmountConverter
+            from shared.crypto.price_utils import get_crypto_price
+            from shared.fiat.forex_service import ForexService
+            
+            # Get current crypto price in USD and UGX at transaction time
+            try:
+                eth_price_usd = get_crypto_price("ETH")
+                forex_service = ForexService()
+                usd_to_ugx_rate = forex_service.get_exchange_rate('USD', 'UGX')
+                eth_price_ugx = eth_price_usd * usd_to_ugx_rate
+                
+                # Store price data in transaction metadata
+                if transaction.metadata_json is None:
+                    transaction.metadata_json = {}
+                transaction.metadata_json.update({
+                    "eth_price_usd_at_time": str(eth_price_usd),
+                    "eth_price_ugx_at_time": str(eth_price_ugx),
+                    "usd_to_ugx_rate_at_time": str(usd_to_ugx_rate),
+                    "price_timestamp": event.timestamp
+                })
+                
+                logger.info(f"💰 Captured ETH price at transaction time: ${eth_price_usd} USD, {eth_price_ugx} UGX")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to capture price at transaction time: {e}")
+            
             # Get or create crypto asset account
             crypto_account_name = f"Crypto Assets - ETH"
             crypto_account = accounting_service.get_account_by_name(crypto_account_name)
@@ -691,54 +892,63 @@ class AlchemyWebSocketClient:
             amount_display = AmountConverter.format_display_amount(transaction.amount_smallest_unit, "ETH")
             description = f"ETH {direction} - {amount_display} (TX: {event.tx_hash[:8]}...)"
             
-            # Create journal entry
+            # Create journal entry (using session from accounting_service)
             journal_entry = JournalEntry(description=description)
-            session.add(journal_entry)
-            session.flush()  # Get ID
+            accounting_service.session.add(journal_entry)
+            accounting_service.session.flush()  # Get ID
+            
+            # Convert smallest units to standard amount for ledger
+            amount_standard = AmountConverter.from_smallest_units(transaction.amount_smallest_unit, "ETH")
             
             # Create ledger transactions based on direction
             if is_withdrawal:
-                # Debit: Pending settlements (liability), Credit: Crypto assets
-                pending_account = accounting_service.get_account_by_name("Pending Trade Settlements")
-                if pending_account:
-                    # Debit pending settlements
+                # Withdrawal: Debit User Liabilities, Credit Crypto Assets
+                user_liability_account = accounting_service.get_account_by_name("User Liabilities - ETH")
+                if user_liability_account:
+                    # Debit user liabilities (decrease what we owe user)
                     debit_tx = LedgerTransaction(
                         journal_entry_id=journal_entry.id,
-                        account_id=pending_account.id,
-                        debit_smallest_unit=transaction.amount_smallest_unit,
-                        credit_smallest_unit=0
+                        account_id=user_liability_account.id,
+                        debit=amount_standard,
+                        credit=Decimal('0')
                     )
-                    session.add(debit_tx)
+                    accounting_service.session.add(debit_tx)
                     
-                    # Credit crypto assets
+                    # Credit crypto assets (decrease our crypto holdings)
                     credit_tx = LedgerTransaction(
                         journal_entry_id=journal_entry.id,
                         account_id=crypto_account.id,
-                        debit_smallest_unit=0,
-                        credit_smallest_unit=transaction.amount_smallest_unit
+                        debit=Decimal('0'),
+                        credit=amount_standard
                     )
-                    session.add(credit_tx)
+                    accounting_service.session.add(credit_tx)
+                    logger.info(f"✅ Created ledger transactions for withdrawal")
+                else:
+                    logger.error(f"❌ User Liabilities - ETH account not found - no ledger transactions created!")
             else:
-                # Deposit: Debit crypto assets, Credit pending settlements
-                pending_account = accounting_service.get_account_by_name("Pending Trade Settlements")
-                if pending_account:
-                    # Debit crypto assets
+                # Deposit: Debit Crypto Assets, Credit User Liabilities
+                user_liability_account = accounting_service.get_account_by_name("User Liabilities - ETH")
+                if user_liability_account:
+                    # Debit crypto assets (increase our crypto holdings)
                     debit_tx = LedgerTransaction(
                         journal_entry_id=journal_entry.id,
                         account_id=crypto_account.id,
-                        debit_smallest_unit=transaction.amount_smallest_unit,
-                        credit_smallest_unit=0
+                        debit=amount_standard,
+                        credit=Decimal('0')
                     )
-                    session.add(debit_tx)
+                    accounting_service.session.add(debit_tx)
                     
-                    # Credit pending settlements
+                    # Credit user liabilities (increase what we owe user)
                     credit_tx = LedgerTransaction(
                         journal_entry_id=journal_entry.id,
-                        account_id=pending_account.id,
-                        debit_smallest_unit=0,
-                        credit_smallest_unit=transaction.amount_smallest_unit
+                        account_id=user_liability_account.id,
+                        debit=Decimal('0'),
+                        credit=amount_standard
                     )
-                    session.add(credit_tx)
+                    accounting_service.session.add(credit_tx)
+                    logger.info(f"✅ Created ledger transactions for deposit")
+                else:
+                    logger.error(f"❌ User Liabilities - ETH account not found - no ledger transactions created!")
             
             # Link transaction to journal entry
             transaction.journal_entry_id = journal_entry.id
@@ -746,10 +956,12 @@ class AlchemyWebSocketClient:
             logger.info(f"📊 Created accounting entry: {description}")
             
         except Exception as e:
+            import traceback
             logger.error(f"❌ Error creating accounting entry: {e}")
+            logger.error(traceback.format_exc())
             raise
     
-    def _create_reservation_sync(self, account_id: int, amount_wei: int, tx_hash: str):
+    def _create_reservation_sync(self, session, account_id: int, amount_wei: int, tx_hash: str):
         """Create a reservation to lock the amount (synchronous)"""
         try:
             account = session.query(Account).filter_by(id=account_id).first()
@@ -768,7 +980,7 @@ class AlchemyWebSocketClient:
             reservation = Reservation(
                 user_id=account.user_id,
                 reference=reservation_reference,
-                amount=float(CryptoPrecisionManager.from_smallest_unit(amount_wei, "ETH")),
+                amount=float(AmountConverter.from_smallest_units(amount_wei, "ETH")),
                 type=ReservationType.RESERVE,
                 status="active"
             )
@@ -783,6 +995,7 @@ class AlchemyWebSocketClient:
     
     def _update_account_balance_sync(self, account_id: int, amount: Decimal):
         """Update account balance (synchronous) - now handles credit after confirmations"""
+        session = get_session()
         try:
             account = session.query(Account).filter_by(id=account_id).first()
             if not account:
@@ -790,7 +1003,7 @@ class AlchemyWebSocketClient:
                 return
             
             # Convert amount to smallest units
-            amount_wei = CryptoPrecisionManager.to_smallest_unit(amount, "ETH")
+            amount_wei = AmountConverter.to_smallest_units(amount, "ETH")
             
             # Update balance in smallest units
             current_balance = account.crypto_balance_smallest_unit or 0
@@ -798,13 +1011,17 @@ class AlchemyWebSocketClient:
             account.crypto_balance_smallest_unit = new_balance
             
             # Convert back to ETH for logging
-            amount_eth = CryptoPrecisionManager.from_smallest_unit(amount_wei, "ETH")
+            amount_eth = AmountConverter.from_smallest_units(amount_wei, "ETH")
             
+            session.commit()
             logger.info(f"💰 Credited account {account_id}: +{amount_eth} ETH ({amount_wei:,} wei)")
             
         except Exception as e:
             logger.error(f"❌ Error updating account balance: {e}")
+            session.rollback()
             raise
+        finally:
+            session.close()
     
     def _send_notification_sync(self, event: TransactionEvent, crypto_address: CryptoAddress):
         """Send notification (synchronous)"""
@@ -819,6 +1036,7 @@ class AlchemyWebSocketClient:
     
     def _process_confirmed_transaction_sync(self, tx_hash: str, tx_type: TransactionType = TransactionType.DEPOSIT):
         """Process a transaction that has reached 15 confirmations (synchronous)"""
+        session = get_session()
         try:
             # Find the transaction
             transaction = session.query(Transaction).filter_by(blockchain_txid=tx_hash, type=tx_type).first()
@@ -900,7 +1118,7 @@ class AlchemyWebSocketClient:
             release_reservation = Reservation(
                 user_id=account.user_id,
                 reference=release_reference,
-                amount=float(CryptoPrecisionManager.from_smallest_unit(amount_wei, "ETH")),
+                amount=float(AmountConverter.from_smallest_units(amount_wei, "ETH")),
                 type=ReservationType.RELEASE,
                 status="completed"
             )
@@ -909,19 +1127,25 @@ class AlchemyWebSocketClient:
             session.commit()
             
             # Convert back to ETH for logging
-            amount_eth = CryptoPrecisionManager.from_smallest_unit(amount_wei, "ETH")
+            amount_eth = AmountConverter.from_smallest_units(amount_wei, "ETH")
             
             logger.info(f"   Amount: {amount_eth} ETH ({amount_wei:,} wei)")
             logger.info(f"   Account: {account.id}")
-            logger.info(f"   New balance: {account.get_balance()} ETH")
-            logger.info(f"   New locked: {account.get_locked_amount()} ETH")
+            # Convert balance back to ETH for logging
+            balance_eth = AmountConverter.from_smallest_units(account.crypto_balance_smallest_unit or 0, "ETH")
+            locked_eth = AmountConverter.from_smallest_units(account.crypto_locked_amount_smallest_unit or 0, "ETH")
+            logger.info(f"   New balance: {balance_eth} ETH")
+            logger.info(f"   New locked: {locked_eth} ETH")
             
         except Exception as e:
             logger.error(f"❌ Error processing confirmed transaction {tx_hash}: {e}")
             session.rollback()
+        finally:
+            session.close()
     
     def _process_block_confirmations_sync(self, current_block: int):
         """Process confirmations for all pending transactions based on new block (synchronous)"""
+        session = get_session()
         try:
             # Get all pending ETH and ERC20 token transactions
             from db.wallet import Account  # local import to avoid circulars at module load
@@ -999,10 +1223,7 @@ class AlchemyWebSocketClient:
         except Exception as e:
             logger.error(f"❌ Error processing block confirmations: {e}")
         finally:
-            try:
-                session.remove()
-            except Exception:
-                pass
+            session.close()
 
     def _scan_erc20_transfers_for_block(self, block_number: int):
         """Scan ERC-20 Transfer logs in this block for monitored addresses and record deposits."""
@@ -1025,7 +1246,8 @@ class AlchemyWebSocketClient:
             from shared.crypto.clients.eth import ETHWallet, EthereumConfig
             api_key = os.getenv('ALCHEMY_API_KEY')
             cfg = EthereumConfig.mainnet(api_key) if self.network == 'mainnet' else EthereumConfig.testnet(api_key)
-            eth_client = ETHWallet(user_id=0, eth_config=cfg, session=session, logger=logger)
+            client_session = get_session()
+            eth_client = ETHWallet(user_id=0, eth_config=cfg, session=client_session, logger=logger)
 
             # Topic0 for Transfer(address,address,uint256)
             topic0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
@@ -1169,7 +1391,8 @@ class AlchemyWebSocketClient:
             from shared.crypto.clients.eth import ETHWallet, EthereumConfig
             api_key = os.getenv('ALCHEMY_API_KEY')
             cfg = EthereumConfig.mainnet(api_key) if self.network == 'mainnet' else EthereumConfig.testnet(api_key)
-            eth_client = ETHWallet(user_id=0, eth_config=cfg, session=session, logger=logger)
+            client_session = get_session()
+            eth_client = ETHWallet(user_id=0, eth_config=cfg, session=client_session, logger=logger)
 
             topic0 = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
             to_hex = hex(int(to_block_number))
@@ -1203,90 +1426,104 @@ class AlchemyWebSocketClient:
                         if not symbol:
                             symbol = 'TOKEN'
 
-                        ca = session.query(CryptoAddress).filter(
-                            CryptoAddress.address.ilike(to_addr),
-                            CryptoAddress.is_active == True
-                        ).first()
-                        if not ca:
-                            continue
-
-                        acc = session.query(Account).filter_by(id=ca.account_id).first()
-                        if not acc:
-                            continue
-                        token_accounts = session.query(Account).filter_by(user_id=acc.user_id, currency=symbol).all()
-                        token_account = None
-                        for t in token_accounts:
-                            if t.precision_config and t.precision_config.get('parent_currency','').upper() == 'ETH':
-                                token_account = t
-                                break
-                        if not token_account:
-                            continue
-
-                        
-                        if not (token_account.currency and token_account.currency.upper() == symbol and (token_account.precision_config or {}).get('parent_currency','').upper() == 'ETH'):
-                            logger.info(f"Skipping ERC20 {symbol} deposit to {to_addr} because it's not a token account")
-                            continue
-
-                        existing = session.query(Transaction).filter_by(
-                            blockchain_txid=log.get('transactionHash'),
-                            address=to_addr.lower(),
-                            type=TransactionType.DEPOSIT,
-                        ).first()
-                        if existing:
-                            continue
-
-                        amount_standard = Decimal(value_smallest) / (Decimal(10) ** Decimal(decimals))
-                        res = Reservation(
-                            user_id=acc.user_id,
-                            reference=f"eth_erc20_{log.get('blockNumber')}_{log.get('transactionHash','')[:8]}",
-                            amount=float(amount_standard),
-                            type=ReservationType.RESERVE,
-                            status='active',
-                        )
-                        session.add(res)
-
-                        # Parse block number from log
+                        # Use a separate session for each log processing to avoid session conflicts
+                        log_session = get_session()
                         try:
-                            log_block = int(log.get('blockNumber'), 16) if isinstance(log.get('blockNumber'), str) else int(log.get('blockNumber') or 0)
-                        except Exception:
-                            log_block = int(to_block_number)
+                            ca = log_session.query(CryptoAddress).filter(
+                                CryptoAddress.address.ilike(to_addr),
+                                CryptoAddress.is_active == True
+                            ).first()
+                            if not ca:
+                                continue
 
-                        tx = Transaction(
-                            account_id=token_account.id,
-                            reference_id=log.get('transactionHash'),
-                            amount=float(amount_standard),
-                            amount_smallest_unit=int(value_smallest),
-                            precision_config={
-                                'currency': symbol,
-                                'decimals': int(decimals),
-                                'smallest_unit': 'units',
-                                'parent_currency': 'ETH',
-                            },
-                            type=TransactionType.DEPOSIT,
-                            status=TransactionStatus.AWAITING_CONFIRMATION,
-                            description=f"ERC20 {symbol} transfer {log.get('transactionHash','')[:8]}...",
-                            blockchain_txid=log.get('transactionHash'),
-                            confirmations=0,
-                            required_confirmations=15,
-                            address=to_addr.lower(),
-                            provider=PaymentProvider.CRYPTO,
-                            metadata_json={
-                                'from_address': from_addr,
-                                'to_address': to_addr,
-                                'contract': contract,
-                                'log_index': log.get('logIndex'),
-                                'block_number': log_block,
-                                'value_smallest': str(value_smallest),
-                                'symbol': symbol,
-                                'decimals': int(decimals),
-                            },
-                        )
-                        session.add(tx)
-                        session.commit()
-                        logger.info(f"💾 Recorded ERC20 {symbol} deposit to {to_addr}: {amount_standard} (smallest={value_smallest})")
+                            acc = log_session.query(Account).filter_by(id=ca.account_id).first()
+                            if not acc:
+                                continue
+                            token_accounts = log_session.query(Account).filter_by(user_id=acc.user_id, currency=symbol).all()
+                            token_account = None
+                            for t in token_accounts:
+                                if t.precision_config and t.precision_config.get('parent_currency','').upper() == 'ETH':
+                                    token_account = t
+                                    break
+                            if not token_account:
+                                continue
+
+                            
+                            if not (token_account.currency and token_account.currency.upper() == symbol and (token_account.precision_config or {}).get('parent_currency','').upper() == 'ETH'):
+                                logger.info(f"Skipping ERC20 {symbol} deposit to {to_addr} because it's not a token account")
+                                continue
+
+                            existing = log_session.query(Transaction).filter_by(
+                                blockchain_txid=log.get('transactionHash'),
+                                address=to_addr.lower(),
+                                type=TransactionType.DEPOSIT,
+                            ).first()
+                            if existing:
+                                continue
+
+                            amount_standard = Decimal(value_smallest) / (Decimal(10) ** Decimal(decimals))
+                            res = Reservation(
+                                user_id=acc.user_id,
+                                reference=f"eth_erc20_{log.get('blockNumber')}_{log.get('transactionHash','')[:8]}",
+                                amount=float(amount_standard),
+                                type=ReservationType.RESERVE,
+                                status='active',
+                            )
+                            log_session.add(res)
+
+                            # Parse block number from log
+                            try:
+                                log_block = int(log.get('blockNumber'), 16) if isinstance(log.get('blockNumber'), str) else int(log.get('blockNumber') or 0)
+                            except Exception:
+                                log_block = int(to_block_number)
+
+                            tx = Transaction(
+                                account_id=token_account.id,
+                                reference_id=log.get('transactionHash'),
+                                amount=float(amount_standard),
+                                amount_smallest_unit=int(value_smallest),
+                                precision_config={
+                                    'currency': symbol,
+                                    'decimals': int(decimals),
+                                    'smallest_unit': 'units',
+                                    'parent_currency': 'ETH',
+                                },
+                                type=TransactionType.DEPOSIT,
+                                status=TransactionStatus.AWAITING_CONFIRMATION,
+                                description=f"ERC20 {symbol} transfer {log.get('transactionHash','')[:8]}...",
+                                blockchain_txid=log.get('transactionHash'),
+                                confirmations=0,
+                                required_confirmations=15,
+                                address=to_addr.lower(),
+                                provider=PaymentProvider.CRYPTO,
+                                metadata_json={
+                                    'from_address': from_addr,
+                                    'to_address': to_addr,
+                                    'contract': contract,
+                                    'log_index': log.get('logIndex'),
+                                    'block_number': log_block,
+                                    'value_smallest': str(value_smallest),
+                                    'symbol': symbol,
+                                    'decimals': int(decimals),
+                                },
+                            )
+                        
+                            try:
+                                log_session.add(tx)
+                                log_session.commit()
+                                logger.info(f"💾 Recorded ERC20 {symbol} deposit to {to_addr}: {amount_standard} (smallest={value_smallest})")
+                            except Exception as e:
+                                log_session.rollback()
+                                logger.error(f"Error recording ERC20 log deposit (range): {e}")
+                            finally:
+                                log_session.close()
+                        except Exception as e:
+                            log_session.rollback()
+                            logger.error(f"Error processing ERC20 log: {e}")
+                        finally:
+                            log_session.close()
                     except Exception as e:
-                        session.rollback()
-                        logger.error(f"Error recording ERC20 log deposit (range): {e}")
+                        logger.error(f"Error processing ERC20 log: {e}")
         except Exception as e:
             logger.error(f"ERC20 range scan error: {e}")
 
@@ -1306,162 +1543,170 @@ class AlchemyWebSocketClient:
 
             api_key = os.getenv('ALCHEMY_API_KEY')
             cfg = EthereumConfig.mainnet(api_key) if self.network == 'mainnet' else EthereumConfig.testnet(api_key)
-            eth_client = ETHWallet(user_id=0, eth_config=cfg, session=session, logger=logger)
+            client_session = get_session()
+            
+            try:
+                eth_client = ETHWallet(user_id=0, eth_config=cfg, session=client_session, logger=logger)
 
-            from_hex = hex(int(from_block_number))
-            to_hex = hex(int(to_block_number))
+                from_hex = hex(int(from_block_number))
+                to_hex = hex(int(to_block_number))
 
-            for recv in list(self.monitored_addresses):
-                params = {
-                    'fromBlock': from_hex,
-                    'toBlock': to_hex,
-                    'toAddress': recv,
-                    'excludeZeroValue': True,
-                    'category': ['erc20'],
-                    'withMetadata': True,
-                    'order': 'asc',
-                    'maxCount': '0x3e8',
-                }
-                transfers = eth_client.get_asset_transfers(params) or []
-                logger.info(f"Transfers: {transfers}")
-                if not transfers:
-                    continue
-                for t in transfers:
-                    try:
-                        tx_hash = t.get('hash')
-                        to_addr = (t.get('to') or '').lower()
-                        from_addr = (t.get('from') or '').lower()
-                        if not tx_hash or not to_addr:
-                            continue
+                for recv in list(self.monitored_addresses):
+                    params = {
+                        'fromBlock': from_hex,
+                        'toBlock': to_hex,
+                        'toAddress': recv,
+                        'excludeZeroValue': True,
+                        'category': ['erc20'],
+                        'withMetadata': True,
+                        'order': 'asc',
+                        'maxCount': '0x3e8',
+                    }
+                    transfers = eth_client.get_asset_transfers(params) or []
+                    logger.info(f"Transfers: {transfers}")
+                    if not transfers:
+                        continue
+                    for t in transfers:
+                        try:
+                            tx_hash = t.get('hash')
+                            to_addr = (t.get('to') or '').lower()
+                            from_addr = (t.get('from') or '').lower()
+                            if not tx_hash or not to_addr:
+                                continue
 
-                        # Contract and metadata
-                        raw = t.get('rawContract') or {}
-                        contract = (raw.get('address') or '').lower()
+                            # Contract and metadata
+                            raw = t.get('rawContract') or {}
+                            contract = (raw.get('address') or '').lower()
 
-                        logger.info(f"Contract address: {contract}")
+                            logger.info(f"Contract address: {contract}")
 
-                        # Resolve symbol/decimals: prefer allowlist, then use API fields
-                        symbol = None
-                        decimals = None
-                        for sym, meta in contracts_map.items():
-                            if str(meta.get('address','')).lower() == contract:
-                                symbol = sym.upper()
+                            # Resolve symbol/decimals: prefer allowlist, then use API fields
+                            symbol = None
+                            decimals = None
+                            for sym, meta in contracts_map.items():
+                                if str(meta.get('address','')).lower() == contract:
+                                    symbol = sym.upper()
+                                    try:
+                                        decimals = int(meta.get('decimals'))
+                                    except Exception:
+                                        decimals = None
+                                    break
+                            if not symbol:
+                                symbol = (t.get('asset') or 'TOKEN').upper()
+                            if decimals is None:
                                 try:
-                                    decimals = int(meta.get('decimals'))
+                                    # Some payloads include decimal in rawContract
+                                    decimals = int(raw.get('decimal')) if raw.get('decimal') is not None else 18
                                 except Exception:
-                                    decimals = None
-                                break
-                        if not symbol:
-                            symbol = (t.get('asset') or 'TOKEN').upper()
-                        if decimals is None:
+                                    decimals = 18
+
+                            # Amounts
+                            val = t.get('value')
                             try:
-                                # Some payloads include decimal in rawContract
-                                decimals = int(raw.get('decimal')) if raw.get('decimal') is not None else 18
+                                amount_standard = Decimal(str(val)) if val is not None else Decimal(0)
                             except Exception:
-                                decimals = 18
+                                amount_standard = Decimal(0)
+                            value_smallest = int((amount_standard * (Decimal(10) ** Decimal(decimals))).to_integral_value())
 
-                        # Amounts
-                        val = t.get('value')
-                        try:
-                            amount_standard = Decimal(str(val)) if val is not None else Decimal(0)
-                        except Exception:
-                            amount_standard = Decimal(0)
-                        value_smallest = int((amount_standard * (Decimal(10) ** Decimal(decimals))).to_integral_value())
+                            # Dedup check - use a separate session for each transfer processing
+                            transfer_session = get_session()
+                            try:
+                                existing = transfer_session.query(Transaction).filter_by(
+                                    blockchain_txid=tx_hash,
+                                    address=to_addr,
+                                    type=TransactionType.DEPOSIT,
+                                ).first()
+                                if existing:
+                                    continue
 
-                        # Dedup check
-                        existing = session.query(Transaction).filter_by(
-                            blockchain_txid=tx_hash,
-                            address=to_addr,
-                            type=TransactionType.DEPOSIT,
-                        ).first()
-                        if existing:
-                            continue
+                                # Ensure recipient address belongs to an active crypto address
+                                ca = transfer_session.query(CryptoAddress).filter(
+                                    CryptoAddress.address.ilike(to_addr),
+                                    CryptoAddress.is_active == True
+                                ).first()
+                                if not ca:
+                                    continue
+                                logger.info(f"Crypto address: {ca}")
 
-                        # Ensure recipient address belongs to an active crypto address
-                        ca = session.query(CryptoAddress).filter(
-                            CryptoAddress.address.ilike(to_addr),
-                            CryptoAddress.is_active == True
-                        ).first()
-                        if not ca:
-                            continue
-                        logger.info(f"Crypto address: {ca}")
+                                acc = transfer_session.query(Account).filter_by(id=ca.account_id).first()
+                                token_accounts = transfer_session.query(Account).filter_by(user_id=acc.user_id, currency=symbol).all()
+                                token_account = None
+                                for t_acc in token_accounts:
+                                    if (t_acc.precision_config or {}).get('parent_currency','').upper() == 'ETH':
+                                        token_account = t_acc
+                                        break
 
-                        acc = session.query(Account).filter_by(id=ca.account_id).first()
-                        token_accounts = session.query(Account).filter_by(user_id=acc.user_id, currency=symbol).all()
-                        token_account = None
-                        for t_acc in token_accounts:
-                            if (t_acc.precision_config or {}).get('parent_currency','').upper() == 'ETH':
-                                token_account = t_acc
-                                break
-
-                        if not token_account:
-                            logger.info(f"No token account found for {symbol}")
-                            continue
-                        if not (token_account.currency and token_account.currency.upper() == symbol and (token_account.precision_config or {}).get('parent_currency','').upper() == 'ETH'):
-                            logger.info(f"Account does not match")
-                            continue
+                                if not token_account:
+                                    logger.info(f"No token account found for {symbol}")
+                                    continue
+                                if not (token_account.currency and token_account.currency.upper() == symbol and (token_account.precision_config or {}).get('parent_currency','').upper() == 'ETH'):
+                                    logger.info(f"Account does not match")
+                                    continue
 
 
-                        # Block number
-                        try:
-                            log_block = int(t.get('blockNum'), 16) if isinstance(t.get('blockNum'), str) else int(t.get('blockNum') or 0)
-                        except Exception:
-                            log_block = int(to_block_number)
+                                # Block number
+                                try:
+                                    log_block = int(t.get('blockNum'), 16) if isinstance(t.get('blockNum'), str) else int(t.get('blockNum') or 0)
+                                except Exception:
+                                    log_block = int(to_block_number)
 
-                        logger.info(f"Making a reservation for {symbol} {amount_standard}")
+                                logger.info(f"Making a reservation for {symbol} {amount_standard}")
 
-                        # Create reservation and transaction
-                        res = Reservation(
-                            user_id=acc.user_id,
-                            reference=f"eth_erc20_{log_block}_{tx_hash[:8]}",
-                            amount=float(amount_standard),
-                            type=ReservationType.RESERVE,
-                            status='active',
-                        )
-                        session.add(res)
+                                # Create reservation and transaction
+                                res = Reservation(
+                                    user_id=acc.user_id,
+                                    reference=f"eth_erc20_{log_block}_{tx_hash[:8]}",
+                                    amount=float(amount_standard),
+                                    type=ReservationType.RESERVE,
+                                    status='active',
+                                )
+                                transfer_session.add(res)
 
-                        tx = Transaction(
-                            account_id=token_account.id,
-                            reference_id=tx_hash,
-                            amount=float(amount_standard),
-                            amount_smallest_unit=int(value_smallest),
-                            precision_config={
-                                'currency': symbol,
-                                'decimals': int(decimals),
-                                'smallest_unit': 'units',
-                                'parent_currency': 'ETH',
-                            },
-                            type=TransactionType.DEPOSIT,
-                            status=TransactionStatus.AWAITING_CONFIRMATION,
-                            description=f"ERC20 {symbol} transfer {tx_hash[:8]}...",
-                            blockchain_txid=tx_hash,
-                            confirmations=0,
-                            required_confirmations=15,
-                            address=to_addr,
-                            provider=PaymentProvider.CRYPTO,
-                            metadata_json={
-                                'from_address': from_addr,
-                                'to_address': to_addr,
-                                'contract': contract,
-                                'block_number': log_block,
-                                'value_smallest': str(value_smallest),
-                                'symbol': symbol,
-                                'decimals': int(decimals),
-                            },
-                        )
-                        session.add(tx)
-                        session.commit()
-                        logger.info(f"Recorded ERC20 {symbol} deposit to {to_addr}: {amount_standard} (smallest={value_smallest})")
-                    except Exception as e:
-                        session.rollback()
-                        logger.error(f"Error recording ERC20 transfer (transfers API): {e}")
+                                tx = Transaction(
+                                    account_id=token_account.id,
+                                    reference_id=tx_hash,
+                                    amount=float(amount_standard),
+                                    amount_smallest_unit=int(value_smallest),
+                                    precision_config={
+                                        'currency': symbol,
+                                        'decimals': int(decimals),
+                                        'smallest_unit': 'units',
+                                        'parent_currency': 'ETH',
+                                    },
+                                    type=TransactionType.DEPOSIT,
+                                    status=TransactionStatus.AWAITING_CONFIRMATION,
+                                    description=f"ERC20 {symbol} transfer {tx_hash[:8]}...",
+                                    blockchain_txid=tx_hash,
+                                    confirmations=0,
+                                    required_confirmations=15,
+                                    address=to_addr,
+                                    provider=PaymentProvider.CRYPTO,
+                                    metadata_json={
+                                        'from_address': from_addr,
+                                        'to_address': to_addr,
+                                        'contract': contract,
+                                        'block_number': log_block,
+                                        'value_smallest': str(value_smallest),
+                                        'symbol': symbol,
+                                        'decimals': int(decimals),
+                                    },
+                                )
+                                transfer_session.add(tx)
+                                transfer_session.commit()
+                                logger.info(f"Recorded ERC20 {symbol} deposit to {to_addr}: {amount_standard} (smallest={value_smallest})")
+                            except Exception as e:
+                                transfer_session.rollback()
+                                logger.error(f"Error recording ERC20 transfer (transfers API): {e}")
+                            finally:
+                                transfer_session.close()
+                        except Exception as e:
+                            logger.error(f"Error processing ERC20 transfer: {e}")
+            except Exception as e:
+                logger.error(f"ERC20 transfers API scan error: {e}")
+            finally:
+                client_session.close()
         except Exception as e:
             logger.error(f"ERC20 transfers API scan error: {e}")
-        finally:
-            try:
-                session.remove()
-            except Exception:
-                pass
     
     def _scan_eth_transfers_for_block(self, block_number: int):
         """Scan a specific block for regular ETH transfers (non-ERC20)"""
@@ -1692,6 +1937,7 @@ class AlchemyWebSocketClient:
 
     def _check_transaction_confirmations_for_block_sync(self, transaction: Transaction, current_block: int):
         """Check transaction confirmations against current block (synchronous)"""
+        session = get_session()
         try:
             # Guard: process only ETH transactions here
             from db.wallet import Account  # local import to avoid circulars
@@ -1711,45 +1957,95 @@ class AlchemyWebSocketClient:
             logger.info(f" confirming transaction {transaction.blockchain_txid} with metadata {transaction.metadata_json}")
             
             # Calculate confirmations
+            tx_block = 0
             if transaction.metadata_json and 'block_number' in transaction.metadata_json:
                 tx_block = int(transaction.metadata_json.get('block_number', 0))
-                if tx_block == 0:
-                    metadata = transaction.metadata_json or {}
-                    metadata['block_number'] = current_block
-                    transaction.metadata_json = metadata
-                    # Mark the field as modified for SQLAlchemy
-                    from sqlalchemy.orm.attributes import flag_modified
-                    flag_modified(transaction, "metadata_json")
-                    session.commit()
-                else:
-                    confirmations = current_block - tx_block
+            
+            # If block number is missing or 0, fetch it from transaction receipt
+            if tx_block == 0:
+                try:
+                    # Use Alchemy API directly to get transaction receipt
+                    api_key = os.getenv('ALCHEMY_API_KEY')
+                    if self.network == "sepolia":
+                        url = f"https://eth-sepolia.g.alchemy.com/v2/{api_key}"
+                    elif self.network == "goerli":
+                        url = f"https://eth-goerli.g.alchemy.com/v2/{api_key}"
+                    else:
+                        url = f"https://eth-mainnet.g.alchemy.com/v2/{api_key}"
                     
-                    # Update transaction confirmations
-                    transaction.confirmations = confirmations
+                    payload = {
+                        "jsonrpc": "2.0",
+                        "method": "eth_getTransactionReceipt",
+                        "params": [transaction.blockchain_txid],
+                        "id": 1
+                    }
                     
-                    # Check if ready for confirmation
-                    if confirmations >= transaction.required_confirmations:
-                        logger.info(f"🎯 Transaction {transaction.blockchain_txid} reached {confirmations} confirmations")
-                        self._process_confirmed_transaction_sync(transaction.blockchain_txid, transaction.type)
-                    elif confirmations > 0:
-                        logger.info(f"⏳ Transaction {transaction.blockchain_txid} has {confirmations}/{transaction.required_confirmations} confirmations")
+                    response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
                     
-                    session.commit()
-            else:
-                logger.info(f"No block number found for transaction {transaction.blockchain_txid}")
-                metadata = transaction.metadata_json or {}
-                metadata['block_number'] = current_block
-                transaction.metadata_json = metadata
-                # Mark the field as modified for SQLAlchemy
-                from sqlalchemy.orm.attributes import flag_modified
-                flag_modified(transaction, "metadata_json")
-                logger.info(f"transaction.metadata_json: {transaction.metadata_json}")
-                session.commit()
+                    if response.status_code == 200:
+                        data = response.json()
+                        if 'result' in data and data['result']:
+                            receipt = data['result']
+                            tx_block = int(receipt['blockNumber'], 16) if isinstance(receipt['blockNumber'], str) else int(receipt['blockNumber'])
+                            
+                            # Update metadata with the correct block number
+                            metadata = transaction.metadata_json or {}
+                            metadata['block_number'] = tx_block
+                            transaction.metadata_json = metadata
+                            from sqlalchemy.orm.attributes import flag_modified
+                            flag_modified(transaction, "metadata_json")
+                            logger.info(f"📍 Updated transaction {transaction.blockchain_txid} block number to {tx_block}")
+                        else:
+                            logger.warning(f"⚠️ No receipt found for {transaction.blockchain_txid}")
+                            # Don't skip - use a fallback approach
+                            # Assume transaction is very old and should be confirmed
+                            if (current_block - 0) > 100:  # If current block is > 100, assume old transaction
+                                tx_block = current_block - 20  # Set to 20 blocks ago to trigger confirmation
+                                logger.info(f"🔄 Using fallback block number for old transaction {transaction.blockchain_txid}")
+                    else:
+                        logger.warning(f"⚠️ Failed to fetch receipt for {transaction.blockchain_txid}: HTTP {response.status_code}")
+                        # Use fallback for old transactions
+                        if (current_block - 0) > 100:
+                            tx_block = current_block - 20
+                            logger.info(f"🔄 Using fallback block number for old transaction {transaction.blockchain_txid}")
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ Error fetching receipt for {transaction.blockchain_txid}: {e}")
+                    # Use fallback for old transactions
+                    if (current_block - 0) > 100:
+                        tx_block = current_block - 20
+                        logger.info(f"🔄 Using fallback block number for old transaction {transaction.blockchain_txid}")
+            
+            # Skip if we still don't have a valid block number
+            if tx_block == 0:
+                logger.warning(f"⚠️ Skipping transaction {transaction.blockchain_txid} - no valid block number")
+                return
                 
+            # Now calculate confirmations with the correct block number
+            confirmations = current_block - tx_block
+            
+            # Update transaction confirmations
+            transaction.confirmations = confirmations
+            
+            # Check if ready for confirmation
+            if confirmations >= transaction.required_confirmations:
+                logger.info(f"🎯 Transaction {transaction.blockchain_txid} reached {confirmations} confirmations")
+                # Only process confirmation if transaction is still awaiting confirmation
+                if transaction.status == TransactionStatus.AWAITING_CONFIRMATION:
+                    self._process_confirmed_transaction_sync(transaction.blockchain_txid, transaction.type)
+                else:
+                    logger.info(f"📊 Transaction {transaction.blockchain_txid} already {transaction.status.value}, updating confirmations only")
+            elif confirmations > 0:
+                logger.info(f"⏳ Transaction {transaction.blockchain_txid} has {confirmations}/{transaction.required_confirmations} confirmations")
+            
+            session.commit()
             
         except Exception as e:
+            session.rollback()
             logger.error(f"❌ Error checking confirmations for {transaction.blockchain_txid}: {e}")
             logger.error(traceback.format_exc())
+        finally:
+            session.close()
     
     def _check_transaction_confirmations_sync(self, tx_hash: str):
         """Check transaction confirmations and process if ready (synchronous) - legacy method for API calls"""
@@ -1822,17 +2118,25 @@ class AlchemyWebSocketClient:
             return None
     
     def _check_pending_transactions_sync(self):
-        """Check all pending transactions for confirmations (synchronous)"""
+        """Check all pending and completed transactions for confirmations (synchronous)"""
         try:
-            # Get all pending ETH transactions only
+            # Get all ETH transactions that need confirmation updates
             from db.wallet import Account  # local import to avoid circulars at module load
+            from sqlalchemy import or_
+            
             pending_transactions = (
                 session.query(Transaction)
                 .join(Account, Transaction.account_id == Account.id)
                 .filter(
-                    Transaction.status == TransactionStatus.AWAITING_CONFIRMATION,
+                    Transaction.status.in_([TransactionStatus.AWAITING_CONFIRMATION, TransactionStatus.COMPLETED]),
                     Transaction.blockchain_txid.isnot(None),
                     Account.currency == "ETH",
+                    # Include transactions with 0 confirmations or missing block numbers
+                    or_(
+                        Transaction.confirmations == 0,
+                        Transaction.metadata_json['block_number'].astext == '0',
+                        Transaction.metadata_json['block_number'].is_(None)
+                    )
                 )
                 .all()
             )
@@ -1987,15 +2291,57 @@ class AlchemyWebSocketClient:
             return None
     
     def start_confirmation_checker(self):
-        """Start the confirmation checker thread (now using real-time block events)"""
-        # Note: We no longer need periodic checking since we're using real-time block events
-        # This method is kept for backward compatibility but doesn't start a thread
-        logger.info("🔄 Confirmation checking now uses real-time block events")
+        """Start the confirmation checker thread"""
+        if hasattr(self, '_confirmation_checker_thread') and self._confirmation_checker_thread and self._confirmation_checker_thread.is_alive():
+            logger.info("🔄 Confirmation checker already running")
+            return
+            
+        logger.info("🔄 Starting confirmation checker thread")
+        self._confirmation_checker_running = True
+        
+        import threading
+        self._confirmation_checker_thread = threading.Thread(target=self._confirmation_checker_worker, daemon=True)
+        self._confirmation_checker_thread.start()
+        
+        logger.info("✅ Confirmation checker started successfully")
+    
+    def _confirmation_checker_worker(self):
+        """Worker thread that periodically checks pending transactions for confirmations"""
+        logger.info("🔄 Confirmation checker worker started")
+        
+        while getattr(self, '_confirmation_checker_running', False):
+            try:
+                # Check pending transactions every 60 seconds
+                logger.info("🔍 Checking pending transactions for confirmations...")
+                self._check_pending_transactions_sync()
+                
+                # Wait 60 seconds before next check
+                for _ in range(60):
+                    if not getattr(self, '_confirmation_checker_running', False):
+                        break
+                    time.sleep(1)
+                    
+            except Exception as e:
+                logger.error(f"❌ Error in confirmation checker worker: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                
+                # Wait 30 seconds before retrying on error
+                for _ in range(30):
+                    if not getattr(self, '_confirmation_checker_running', False):
+                        break
+                    time.sleep(1)
+        
+        logger.info("🛑 Confirmation checker worker stopped")
     
     def stop_confirmation_checker(self):
-        """Stop the confirmation checker thread (now using real-time block events)"""
-        # Note: We no longer need to stop a thread since we're using real-time block events
-        logger.info("🛑 Confirmation checking uses real-time block events")
+        """Stop the confirmation checker thread"""
+        logger.info("🛑 Stopping confirmation checker")
+        self._confirmation_checker_running = False
+        
+        if hasattr(self, '_confirmation_checker_thread') and self._confirmation_checker_thread:
+            self._confirmation_checker_thread.join(timeout=5)
+            logger.info("✅ Confirmation checker stopped")
     
     def add_address(self, address: str):
         """Add an address to monitor"""
@@ -2021,10 +2367,11 @@ class AlchemyWebSocketClient:
         """Load all active Ethereum addresses from database"""
         try:
             logger.info("🔍 Loading Ethereum addresses from database...")
-            logger.info(f"🔧 Database session: {session}")
+            db_session = get_session()
+            logger.info(f"🔧 Database session: {db_session}")
             logger.info(f"🔧 CryptoAddress model: {CryptoAddress}")
             
-            addresses = session.query(CryptoAddress).filter_by(
+            addresses = db_session.query(CryptoAddress).filter_by(
                 currency_code="ETH",
                 is_active=True
             ).all()
@@ -2037,6 +2384,8 @@ class AlchemyWebSocketClient:
             
             logger.info(f"✅ Successfully loaded {len(addresses)} Ethereum addresses from database")
             logger.info(f"🔍 Currently monitoring {len(self.monitored_addresses)} addresses")
+            
+            db_session.close()
             
         except Exception as e:
             logger.error(f"❌ Error loading addresses from database: {e}")

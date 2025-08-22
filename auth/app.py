@@ -10,7 +10,7 @@ from db.wallet import Account, AccountType
 from pydantic import BaseModel, Field
 from typing import Optional
 import re
-from db.utils import generate_password_hash, produce_message, token_required, verify_password, generate_random_digits
+from db.utils import generate_password_hash, produce_message, token_required, email_verified_required, verify_password, generate_random_digits
 from db.dto import LoginDto, ForgotPasswordDto, VerifyEmailDto, VerifyResetPasswordDto, ResetPasswordDto, RegisterDto, validate_login, validate_registration, validate_reset_pwd, validate_forgot_password
 import jwt
 import datetime
@@ -19,6 +19,7 @@ from jobs import auth_consumer
 import threading
 from shared.kafka_producer import get_kafka_producer
 import uuid
+import traceback
 
 
 
@@ -84,7 +85,7 @@ def create_auth_response(token: str, user_data: dict = None, status_code: int = 
     is_docker_container = request.host.startswith('auth:') or request.host.startswith('api:') or request.host.startswith('nginx:')
     
     # Determine cookie domain based on environment
-    cookie_domain = None  # Default to current domain
+    cookie_domain = os.getenv('COOKIE_DOMAIN')  # Default to current domain
     if not is_development and not is_localhost and not is_docker_container:
         # In production, set domain from environment
         cookie_domain = os.getenv('COOKIE_DOMAIN')
@@ -158,31 +159,73 @@ def register():
             ref_code = generate_random_digits(8)
             user.ref_code = f"{ref_code}"
             user.country = "UG"
-            session.add(user)
-            session.flush()  # Get the user ID
-            
-            # Create default UGX account
-            account = Account()
-            account.user_id = user.id
-            account.currency = "UGX"
-            account.balance = 0
-            account.locked_amount = 0
-            account.account_type = AccountType.FIAT
-            account.account_number = generate_random_digits(10)
-            account.label = "Main Account"
-            session.add(account)
-            
-            session.commit()
-            topic = "verify_email"
-            # send a verification code
-            key = f"{generate_random_digits(20)}"
-            payload = {"email": data.email}
-            produce_message(topic, key, payload, logger)
-            producer.send(USER_REGISTERED_TOPIC, {"user_id": user.id})
-            res = {"message": "User registered successfully"}
-            return jsonify(res), 201
+            try:
+                session.add(user)
+                session.commit()  # Commit user first to get ID
+                
+                # Create user profile with email_verified = False
+                from db.models import Profile
+                profile = Profile()
+                profile.user_id = user.id
+                profile.email_verified = False
+                profile.phone_verified = False
+                profile.two_factor_enabled = False
+                profile.two_factor_key = ""
+                session.add(profile)
+                session.commit()
+                
+                # Get the actual user ID value after commit
+                user_id = user.id
+                
+                topic = "verify_email"
+                # send a verification code
+                key = f"{generate_random_digits(20)}"
+                payload = {"email": data.email}
+                produce_message(topic, key, payload, logger)
+                producer.send(USER_REGISTERED_TOPIC, {"user_id": user_id})
+                
+                # Generate JWT token for the new user
+                token_payload = {
+                    "user_id": user.id,
+                    "email": user.email,
+                    "role": user.role.value,
+                    "exp": datetime.datetime.utcnow() + datetime.timedelta(days=30)
+                }
+                token = jwt.encode(token_payload, config("APP_SECRET"), algorithm="HS256")
+                
+                # Create auth response with verification requirement
+                response_data = {
+                    "message": "User registered successfully",
+                    "redirect": "/auth/verify-email",
+                    "requires_verification": True,
+                    "user": {
+                        "id": user.id,
+                        "email": user.email,
+                        "first_name": user.first_name,
+                        "last_name": user.last_name,
+                        "role": user.role.value
+                    }
+                }
+                
+                response = create_auth_response(token, response_data, 201)
+                
+                # Set verification tracking cookie
+                response.set_cookie(
+                    'email-verification-required',
+                    'true',
+                    httponly=False,
+                    secure=False,  # Set to True in production
+                    samesite='Lax',
+                    max_age=3600  # 1 hour
+                )
+                
+                return response
+            finally:
+                # Ensure session is properly closed
+                session.close()
         except Exception as e:
             logger.error("Error registering user: %r", e)
+            logger.error(traceback.format_exc())
             session.rollback()
             return jsonify({"message":"Error registering user"}), 500
     else:
@@ -222,22 +265,105 @@ def logout():
 @app.route('/verify-email', methods=['POST'])
 def verify_email():
     data = request.get_json()
-    data = VerifyEmailDto(**data)
-    if len(data.code) < 9:
-        payload = {"code": "Invalid verification code"}
-        return jsonify(payload), 400
-    code = EmailVerify.query.filter(EmailVerify.code == data.code).filter(
-        EmailVerify.status == EmailVerifyStatus.PENDING).first()
-    logger.info("CODE: %s", code)
-    if code is None:
-        payload = {"code": "Invalid verification code"}
-        return jsonify(payload), 400
-    user = code.user
-    user.email_verified = True
-    code.status = EmailVerifyStatus.USED
-    session.commit()
-    payload = {"message": "Email verified successfully"}
-    return jsonify(payload), 200
+    
+    # Get email from cookie if not provided in request
+    email = data.get('email') or request.cookies.get('verification-email')
+    if not email:
+        return jsonify({"message": "Email not found"}), 400
+    
+    code = data.get('code')
+    if not code or len(code) != 6:
+        return jsonify({"message": "Invalid verification code"}), 400
+    
+    # Find the verification code for this email
+    try:
+        email_verify = session.query(EmailVerify).filter(
+            EmailVerify.code == code,
+            EmailVerify.status == EmailVerifyStatus.PENDING
+        ).join(User).filter(User.email == email.lower()).first()
+        
+        logger.info("EMAIL VERIFY: %s", email_verify)
+        if email_verify is None:
+            return jsonify({"message": "Invalid verification code"}), 400
+        
+        user = email_verify.user
+        
+        # Create profile if it doesn't exist
+        if not user.profile:
+            from db.models import Profile
+            profile = Profile()
+            profile.user_id = user.id
+            profile.email_verified = True
+            profile.phone_verified = False
+            profile.two_factor_enabled = False
+            profile.two_factor_key = ""
+            session.add(profile)
+        else:
+            user.profile.email_verified = True
+        
+        email_verify.status = EmailVerifyStatus.USED
+        session.commit()
+        
+        # Clear verification cookie
+        response = make_response(jsonify({"message": "Email verified successfully"}), 200)
+        response.delete_cookie('email-verification-required', path='/')
+        
+        return response
+    finally:
+        # Ensure session is properly closed
+        session.close()
+
+
+@app.route('/verification-info', methods=['GET'])
+@token_required
+def verification_info():
+    """Get current user's email for verification purposes"""
+    if not g.user:
+        return jsonify({"message": "User not found"}), 401
+    
+    return jsonify({
+        "email": g.user.email,
+        "verified": g.user.profile.email_verified if g.user.profile else False
+    }), 200
+
+
+@app.route('/resend-verification', methods=['POST'])
+def resend_verification():
+    data = request.get_json()
+    
+    # Get email from request or cookie
+    email = data.get('email') or request.cookies.get('verification-email')
+    if not email:
+        return jsonify({"message": "Email not found"}), 400
+    
+    # Check if user exists and is not already verified
+    user = session.query(User).filter(User.email == email.lower()).first()
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+    
+    if user.profile and user.profile.email_verified:
+        return jsonify({"message": "Email already verified"}), 400
+    
+    # Check for recent verification attempts (rate limiting)
+    recent_verify = session.query(EmailVerify).filter(
+        EmailVerify.user_id == user.id,
+        EmailVerify.created_at > datetime.datetime.now() - datetime.timedelta(minutes=1)
+    ).first()
+    
+    if recent_verify:
+        return jsonify({"message": "Please wait before requesting another code"}), 429
+    
+    try:
+        # Send new verification email
+        topic = "verify_email"
+        key = f"{generate_random_digits(20)}"
+        payload = {"email": email}
+        produce_message(topic, key, payload, logger)
+        
+        return jsonify({"message": "Verification code sent successfully"}), 200
+    except Exception as e:
+        logger.error("Error resending verification: %r", e)
+        return jsonify({"message": "Failed to send verification code"}), 500
 
 
 @app.route('/ping-forgot-pwd', methods=['POST'])
@@ -247,7 +373,7 @@ def ping_forgot_pwd():
     if len(data.code) < 8:
         payload = {"code": "Invalid verification code"}
         return jsonify(payload), 400
-    code = ForgotPassword.query.filter(ForgotPassword.code == data.code).filter(
+    code = session.query(ForgotPassword).filter(ForgotPassword.code == data.code).filter(
         ForgotPassword.status == ForgotPasswordStatus.PENDING).first()
     if code is None:
         payload = {"code": "Invalid verification code"}
@@ -262,7 +388,7 @@ def reset_pwd():
     data = ResetPasswordDto(**data)
     errors = validate_reset_pwd(data)
     if not errors:
-        code = ForgotPassword.query.filter(ForgotPassword.code == data.code).filter(
+        code = session.query(ForgotPassword).filter(ForgotPassword.code == data.code).filter(
             ForgotPassword.status == ForgotPasswordStatus.PENDING).first()
         user = code.user
         user.encrypted_pwd = generate_password_hash(data.password)
@@ -308,7 +434,12 @@ def transaction_reference():
 
 @app.route('/user-config', methods=['GET'])
 @token_required
+@email_verified_required
 def user_config():
+    # Check if user is properly loaded
+    if not g.user:
+        return jsonify({"error": "User not found"}), 401
+    
     # Static deposit limits
     min_deposit = 500
     max_deposit = 5_000_000

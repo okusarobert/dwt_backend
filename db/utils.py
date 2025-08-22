@@ -108,6 +108,8 @@ def decode_token(token):
 
 # Middleware decorator
 def token_required(f):
+    import inspect
+    
     @wraps(f)
     def decorated_function(*args, **kwargs):
         token = None
@@ -128,18 +130,79 @@ def token_required(f):
         if not token:
             current_app.logger.info("Missing token")
             return jsonify({"msg": "Missing token"}), 401
+        
+        current_app.logger.info(f"Token: {token}")
 
         decoded = decode_token(token)
+        current_app.logger.info(f"Decoded token: {decoded}")
 
         if "error" in decoded:
             current_app.logger.info(f"Invalid token: {decoded['error']}")
             return jsonify({"msg": decoded["error"]}), 401
 
         # Attach user to request context
-        user = session.query(User).filter(User.id == decoded["user_id"]).first()
-        g.user = user
-        current_app.logger.info(f"user: {user}: {decoded['user_id']}")
-        return f(*args, **kwargs)
+        try:
+            user = session.query(User).filter(User.id == decoded["user_id"]).first()
+            g.user = user
+            current_app.logger.info(f"user: {user}: {decoded['user_id']}")
+            
+            # Check if function expects current_user parameter
+            sig = inspect.signature(f)
+            if 'current_user' in sig.parameters:
+                result = f(user, *args, **kwargs)
+            else:
+                result = f(*args, **kwargs)
+            return result
+        finally:
+            # Ensure session is properly closed
+            session.close()
+
+    return decorated_function
+
+
+def email_verified_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user = g.user
+        current_app.logger.info(f"Checking email verification for user: {user.id if user else 'None'}")
+        
+        if user is None:
+            current_app.logger.info("User is None - unauthorized")
+            return jsonify({"msg": "Unauthorized"}), 401
+        
+        # Check if user's email is verified through their profile
+        try:
+            if not user.profile or not user.profile.email_verified:
+                current_app.logger.info(f"User {user.id} email not verified, redirecting to verify-email")
+                
+                # Create response with verification requirement flag
+                response_data = {
+                    "msg": "Email verification required",
+                    "redirect": "/auth/verify-email",
+                    "requires_verification": True
+                }
+                response = jsonify(response_data)
+                
+                # Set verification tracking cookie without email (just a flag)
+                from flask import make_response
+                response = make_response(response, 403)
+                response.set_cookie(
+                    'email-verification-required',
+                    'true',
+                    httponly=False,  # Allow JavaScript access
+                    secure=False,  # Set to True in production
+                    samesite='Lax',
+                    max_age=3600  # 1 hour
+                )
+                
+                return response
+            
+            current_app.logger.info(f"User {user.id} email is verified, proceeding")
+            result = f(*args, **kwargs)
+            return result
+        finally:
+            # Ensure session is properly closed
+            session.close()
 
     return decorated_function
 

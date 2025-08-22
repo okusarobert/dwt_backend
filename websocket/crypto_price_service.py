@@ -16,7 +16,7 @@ class CryptoPriceService:
         self.supported_coins = [
             "bitcoin", "ethereum", "binancecoin", "cardano", 
             "solana", "polkadot", "tether", "usd-coin", 
-            "ripple", "matic-network"
+            "ripple", "matic-network", "tron", "litecoin"
         ]
         self.price_cache: Dict[str, dict] = {}
         self.is_running = False
@@ -106,7 +106,9 @@ class CryptoPriceService:
             "tether": "USDT",
             "usd-coin": "USDC",
             "ripple": "XRP",
-            "matic-network": "MATIC"
+            "matic-network": "MATIC",
+            "tron": "TRX",
+            "litecoin": "LTC"
         }
         return symbol_map.get(coin_id, coin_id.upper())
     
@@ -122,7 +124,9 @@ class CryptoPriceService:
             "tether": "Tether",
             "usd-coin": "USD Coin",
             "ripple": "Ripple",
-            "matic-network": "Polygon"
+            "matic-network": "Polygon",
+            "tron": "TRON",
+            "litecoin": "Litecoin"
         }
         return name_map.get(coin_id, coin_id.title())
     

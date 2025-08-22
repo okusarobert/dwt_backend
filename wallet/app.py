@@ -26,6 +26,7 @@ import hashlib
 from lib.payment_metadata import PROVIDER_METADATA_MODELS
 from lib.relworx_client import RelworxApiClient
 from shared.kafka_producer import get_kafka_producer
+from shared.fiat.forex_service import forex_service
 import phonenumbers
 from pydantic import ValidationError
 from confluent_kafka import Producer
@@ -96,25 +97,224 @@ app.logger = setup_logging()
 @app.route('/api/trading/prices', methods=['GET'])
 @token_required
 def get_trading_crypto_prices(current_user):
-    """Get current crypto prices"""
+    """Get current crypto prices in UGX"""
     try:
-        crypto_currency = request.args.get('crypto', 'BTC')
-        fiat_currency = request.args.get('fiat', 'USD')
+        # Get all supported cryptocurrencies with UGX prices
+        cryptocurrencies = ['BTC', 'ETH', 'SOL', 'BNB', 'USDT', 'ADA', 'MATIC']
+        prices = {}
         
-        price = trading_service.get_crypto_price(crypto_currency, fiat_currency)
+        for crypto in cryptocurrencies:
+            try:
+                usd_price = trading_service.get_crypto_price(crypto, 'USD')
+                ugx_price = trading_service.get_crypto_price(crypto, 'UGX')
+                
+                prices[crypto] = {
+                    'price_ugx': ugx_price,
+                    'price_usd': usd_price,
+                    'change_24h': 0,  # TODO: Implement 24h change
+                    'last_updated': datetime.datetime.utcnow().isoformat()
+                }
+            except Exception as e:
+                app.logger.warning(f"Failed to get price for {crypto}: {e}")
+                continue
         
-        return jsonify({
-            "success": True,
-            "data": {
-                "crypto_currency": crypto_currency.upper(),
-                "fiat_currency": fiat_currency.upper(),
-                "price": price,
-                "timestamp": datetime.datetime.utcnow().isoformat()
-            }
-        })
+        return jsonify(prices)
     except Exception as e:
         app.logger.error(f"Error getting crypto prices: {e}")
         return jsonify({"success": False, "error": str(e)}), 400
+
+@app.route('/api/trading/exchange-rate/<from_currency>/<to_currency>', methods=['GET'])
+@token_required
+def get_exchange_rate(current_user, from_currency, to_currency):
+    """Get live exchange rate between two currencies"""
+    try:
+        trading_service = TradingService()
+        rate = trading_service.get_exchange_rate(from_currency, to_currency)
+        
+        return jsonify({
+            "success": True,
+            "from_currency": from_currency,
+            "to_currency": to_currency,
+            "rate": rate
+        })
+    except Exception as e:
+        app.logger.error(f"Error getting exchange rate: {e}")
+        return jsonify({"success": False, "error": str(e)}), 400
+
+# Wallet Crypto Management Endpoints
+# ---------------------------------------------
+
+
+@app.route('/wallet/crypto/<crypto>/deposit/address', methods=['POST'])
+@token_required
+def generate_deposit_address(current_user, crypto):
+    """Generate a deposit address for the specified cryptocurrency"""
+    try:
+        crypto = crypto.upper()
+        session = db.connection.get_session()
+        
+        # Validate supported crypto
+        supported_cryptos = ['BTC', 'ETH', 'SOL', 'BNB', 'USDT', 'TRX', 'LTC']
+        if crypto not in supported_cryptos:
+            return jsonify({"success": False, "error": f"Unsupported cryptocurrency: {crypto}"}), 400
+        
+        # Check if user already has a deposit address for this crypto
+        existing_address = session.query(CryptoAddress).filter(
+            CryptoAddress.user_id == current_user.id,
+            CryptoAddress.currency == crypto,
+            CryptoAddress.address_type == 'deposit'
+        ).first()
+        
+        if existing_address:
+            return jsonify({
+                "success": True,
+                "address": existing_address.address,
+                "memo": existing_address.memo,
+                "currency": crypto
+            })
+        
+        # Generate new address based on crypto type
+        if crypto == 'BTC':
+            btc_wallet = BTC()
+            address = btc_wallet.create_address()
+        elif crypto == 'ETH':
+            eth_wallet = ETH()
+            address = eth_wallet.create_address()
+        elif crypto == 'TRX':
+            trx_wallet = TRX()
+            address = trx_wallet.create_address()
+        elif crypto == 'BNB':
+            bnb_wallet = BNB()
+            address = bnb_wallet.create_address()
+        elif crypto == 'LTC':
+            ltc_wallet = LTC()
+            address = ltc_wallet.create_address()
+        else:
+            # For other cryptos, use a placeholder address generation
+            # In production, implement proper wallet generation for each crypto
+            address = f"generated_{crypto.lower()}_address_{current_user.id}"
+        
+        # Save the address to database
+        crypto_address = CryptoAddress(
+            user_id=current_user.id,
+            currency=crypto,
+            address=address,
+            address_type='deposit',
+            is_active=True
+        )
+        
+        session.add(crypto_address)
+        session.commit()
+        
+        return jsonify({
+            "success": True,
+            "address": address,
+            "currency": crypto
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Error generating deposit address for {crypto}: {e}")
+        if 'session' in locals():
+            session.rollback()
+        return jsonify({"success": False, "error": str(e)}), 400
+    finally:
+        if 'session' in locals():
+            session.close()
+
+@app.route('/wallet/crypto/<crypto>/withdraw', methods=['POST'])
+@token_required
+def withdraw_crypto(current_user, crypto):
+    """Withdraw cryptocurrency to an external address"""
+    try:
+        crypto = crypto.upper()
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"success": False, "error": "No data provided"}), 400
+        
+        amount = data.get('amount')
+        address = data.get('address')
+        
+        if not amount or not address:
+            return jsonify({"success": False, "error": "Amount and address are required"}), 400
+        
+        # Validate supported crypto
+        supported_cryptos = ['BTC', 'ETH', 'SOL', 'BNB', 'USDT', 'TRX', 'LTC']
+        if crypto not in supported_cryptos:
+            return jsonify({"success": False, "error": f"Unsupported cryptocurrency: {crypto}"}), 400
+        
+        session = db.connection.get_session()
+        
+        # Get user's crypto account
+        crypto_account = session.query(Account).filter(
+            Account.user_id == current_user.id,
+            Account.account_type == AccountType.CRYPTO,
+            Account.currency == crypto
+        ).first()
+        
+        if not crypto_account:
+            return jsonify({"success": False, "error": f"No {crypto} account found"}), 400
+        
+        # Convert amount to smallest units
+        if crypto == 'BTC' or crypto == 'LTC':
+            amount_smallest_units = int(float(amount) * 100_000_000)  # to satoshis
+        elif crypto == 'ETH' or crypto == 'BNB':
+            amount_smallest_units = int(float(amount) * 10**18)  # to wei
+        elif crypto == 'SOL':
+            amount_smallest_units = int(float(amount) * 10**9)  # to lamports
+        elif crypto == 'USDT' or crypto == 'TRX':
+            amount_smallest_units = int(float(amount) * 10**6)  # to micro units
+        else:
+            amount_smallest_units = int(float(amount) * 10**8)  # default 8 decimals
+        
+        # Check sufficient balance
+        if crypto_account.balance_smallest_unit < amount_smallest_units:
+            return jsonify({"success": False, "error": "Insufficient balance"}), 400
+        
+        # Create withdrawal transaction
+        transaction = Transaction(
+            user_id=current_user.id,
+            account_id=crypto_account.id,
+            transaction_type=TransactionType.WITHDRAWAL,
+            amount_smallest_unit=amount_smallest_units,
+            currency=crypto,
+            status=TransactionStatus.PENDING,
+            reference_id=f"withdraw_{crypto.lower()}_{current_user.id}_{int(time.time())}",
+            metadata={
+                "withdrawal_address": address,
+                "crypto_currency": crypto,
+                "amount_crypto": amount
+            }
+        )
+        
+        session.add(transaction)
+        
+        # Update account balance
+        crypto_account.balance_smallest_unit -= amount_smallest_units
+        
+        session.commit()
+        
+        # In production, here you would:
+        # 1. Queue the withdrawal for processing
+        # 2. Send to blockchain network
+        # 3. Update transaction status based on blockchain confirmation
+        
+        app.logger.info(f"Withdrawal initiated: {amount} {crypto} to {address} for user {current_user.id}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Withdrawal of {amount} {crypto} initiated successfully",
+            "transaction_id": transaction.reference_id
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Error withdrawing {crypto}: {e}")
+        if 'session' in locals():
+            session.rollback()
+        return jsonify({"success": False, "error": str(e)}), 400
+    finally:
+        if 'session' in locals():
+            session.close()
 
 
 # ---------------------------------------------
@@ -280,7 +480,12 @@ def calculate_trade(current_user):
         
         return jsonify({
             "success": True,
-            "data": amounts
+            "crypto_amount": amounts.get('crypto_amount', 0),
+            "fiat_amount": amounts.get('fiat_amount', 0),
+            "exchange_rate": amounts.get('exchange_rate', 0),
+            "fee_amount": amounts.get('fee_amount', 0),
+            "total_cost": amounts.get('total_cost'),
+            "net_proceeds": amounts.get('net_proceeds')
         })
     except Exception as e:
         app.logger.error(f"Error calculating trade: {e}")
@@ -389,6 +594,7 @@ def sell_crypto(current_user):
             
     except Exception as e:
         app.logger.error(f"Error selling crypto: {e}")
+        app.logger.error(traceback.format_exc())
         return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/api/trading/trades', methods=['GET'])
@@ -396,34 +602,130 @@ def sell_crypto(current_user):
 def get_user_trades(current_user):
     """Get user's trade history"""
     try:
-        limit = int(request.args.get('limit', 50))
+        user_id = current_user.id
         
-        session = db.connection.get_session()
-        trades = trading_service.get_user_trades(current_user.id, session, limit)
+        # Get pagination parameters
+        limit = request.args.get('limit', 10, type=int)
+        offset = request.args.get('offset', 0, type=int)
         
-        trade_data = []
+        # Get optional filters
+        status = request.args.get('status')
+        trade_type = request.args.get('trade_type')
+        
+        session = db.connection.session
+        query = session.query(Trade).filter(Trade.user_id == user_id)
+        
+        # Apply filters
+        if status:
+            query = query.filter(Trade.status == TradeStatus(status))
+        if trade_type:
+            query = query.filter(Trade.trade_type == TradeType(trade_type))
+        
+        # Apply pagination and ordering
+        trades = query.order_by(Trade.created_at.desc()).offset(offset).limit(limit).all()
+        
+        # Convert to dict format
+        trades_data = []
         for trade in trades:
-            trade_data.append({
-                "id": trade.id,
-                "trade_type": trade.trade_type.value,
-                "status": trade.status.value,
-                "crypto_currency": trade.crypto_currency,
-                "crypto_amount": float(trade.crypto_amount),
-                "fiat_currency": trade.fiat_currency,
-                "fiat_amount": float(trade.fiat_amount),
-                "exchange_rate": float(trade.exchange_rate),
-                "fee_amount": float(trade.fee_amount) if trade.fee_amount else 0,
-                "payment_method": trade.payment_method.value,
-                "created_at": trade.created_at.isoformat(),
-                "completed_at": trade.completed_at.isoformat() if trade.completed_at else None
+            trades_data.append({
+                'id': trade.id,
+                'trade_type': trade.trade_type.value,
+                'crypto_currency': trade.crypto_currency,
+                'fiat_currency': trade.fiat_currency,
+                'crypto_amount': float(trade.crypto_amount),
+                'fiat_amount': float(trade.fiat_amount),
+                'exchange_rate': float(trade.exchange_rate),
+                'fee_amount': float(trade.fee_amount),
+                'status': trade.status.value,
+                'payment_method': trade.payment_method.value,
+                'created_at': trade.created_at.isoformat(),
+                'updated_at': trade.updated_at.isoformat()
             })
         
         return jsonify({
             "success": True,
-            "data": trade_data
+            "trades": trades_data,
+            "pagination": {
+                "limit": limit,
+                "offset": offset,
+                "total": len(trades_data)
+            }
         })
     except Exception as e:
         app.logger.error(f"Error getting user trades: {e}")
+        return jsonify({"success": False, "error": str(e)}), 400
+
+@app.route('/api/trading/history', methods=['GET'])
+@token_required
+def get_trading_history(current_user):
+    """Get trading history (alias for trades endpoint)"""
+    try:
+        user_id = current_user.id
+        
+        # Get pagination parameters
+        limit = request.args.get('limit', 10, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        
+        # Get optional filters
+        status = request.args.get('status')
+        trade_type = request.args.get('trade_type')
+        
+        session = db.connection.session
+        
+        # Use specific column selection to avoid missing column errors
+        query = session.query(
+            Trade.id,
+            Trade.trade_type,
+            Trade.crypto_currency,
+            Trade.fiat_currency,
+            Trade.crypto_amount,
+            Trade.fiat_amount,
+            Trade.exchange_rate,
+            Trade.fee_amount,
+            Trade.status,
+            Trade.payment_method,
+            Trade.created_at,
+            Trade.updated_at
+        ).filter(Trade.user_id == user_id)
+        
+        # Apply filters
+        if status:
+            query = query.filter(Trade.status == TradeStatus(status))
+        if trade_type:
+            query = query.filter(Trade.trade_type == TradeType(trade_type))
+        
+        # Apply pagination and ordering
+        trades = query.order_by(Trade.created_at.desc()).offset(offset).limit(limit).all()
+        
+        # Convert to dict format
+        trades_data = []
+        for trade in trades:
+            trades_data.append({
+                'id': trade.id,
+                'trade_type': trade.trade_type.value,
+                'crypto_currency': trade.crypto_currency,
+                'fiat_currency': trade.fiat_currency,
+                'crypto_amount': float(trade.crypto_amount),
+                'fiat_amount': float(trade.fiat_amount),
+                'exchange_rate': float(trade.exchange_rate),
+                'fee_amount': float(trade.fee_amount) if trade.fee_amount else 0.0,
+                'status': trade.status.value,
+                'payment_method': trade.payment_method.value,
+                'created_at': trade.created_at.isoformat(),
+                'updated_at': trade.updated_at.isoformat()
+            })
+        
+        return jsonify({
+            "success": True,
+            "trades": trades_data,
+            "pagination": {
+                "limit": limit,
+                "offset": offset,
+                "total": len(trades_data)
+            }
+        })
+    except Exception as e:
+        app.logger.error(f"Error getting trading history: {e}")
         return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/api/trading/trades/<int:trade_id>', methods=['GET'])
@@ -1643,26 +1945,37 @@ def health():
 @app.route("/wallet/account", methods=["POST"])
 @token_required
 def wallet_create_account():
+    session = None
     try:
         user_id = g.user.id
-        account = create_account(user_id, db.connection.session)
+        session = db.connection.get_session()
+        account = create_account(user_id, session)
         return jsonify(model_to_dict(account)), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+    finally:
+        if session:
+            session.close()
 
 @app.route("/wallet/balance", methods=["GET"])
 @token_required
 def wallet_get_balance():
+    session = None
     try:
         user_id = g.user.id
-        balance = get_balance(user_id, db.connection.session)
+        session = db.connection.get_session()
+        balance = get_balance(user_id, session)
         return jsonify(balance), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+    finally:
+        if session:
+            session.close()
 
 @app.route("/wallet/deposit", methods=["POST"])
 @token_required
 def wallet_deposit():
+    session = None
     try:
         user_id = g.user.id
         data = request.get_json()
@@ -1701,11 +2014,12 @@ def wallet_deposit():
             except Exception as e:
                 return jsonify({"error": [{"phone_number": f"Phone number validation failed: {str(e)}"}]}), 400
         now = datetime.datetime.utcnow().isoformat()
-        account = get_account_by_user_id(user_id, "UGX",db.connection.session)
+        session = db.connection.get_session()
+        account = get_account_by_user_id(user_id, "UGX", session)
         if not account:
             return jsonify({"error": [{"account": "Account not found."}]}), 401
 
-        existing = db.connection.session.query(Transaction).filter_by(
+        existing = session.query(Transaction).filter_by(
                 reference_id=reference_id, type=TransactionType.DEPOSIT).first()
         if existing:
             return jsonify({"error": [{"reference_id": "Deposit transaction already exists for this reference_id."}]}), 409
@@ -1740,8 +2054,8 @@ def wallet_deposit():
                 "parent_currency": "UGX",
             }
         )
-        db.connection.session.add(transaction)
-        db.connection.session.commit()
+        session.add(transaction)
+        session.commit()
         message = {
             "user_id": user_id,
             "amount": amount,
@@ -1755,6 +2069,9 @@ def wallet_deposit():
         return jsonify({"message": "Deposit request is being processed.", "tx_reference": tx_hash}), 201
     except Exception as e:
         return jsonify({"error": [{"exception": str(e)}]}), 400
+    finally:
+        if session:
+            session.close()
 
 # --- /wallet/withdraw endpoint ---
 @app.route("/wallet/withdraw", methods=["POST"])
@@ -2616,22 +2933,87 @@ def wallet_transactions():
         limit = min(int(request.args.get("limit", 20)), 100)  # Cap limit at 100
         offset = max(int(request.args.get("offset", 0)), 0)  # Ensure offset is non-negative
         page = max(int(request.args.get("page", 1)), 1)  # Page number (1-based)
-        currency = request.args.get("currency","UGX").upper()
+        
+        # Filter parameters
+        currency = request.args.get("currency", None)
+        status = request.args.get("status", None)
+        tx_type = request.args.get("type", None)
+        date_from = request.args.get("date_from", None)
+        date_to = request.args.get("date_to", None)
+        search = request.args.get("search", None)
+        
+        # Sorting parameters
+        sort_by = request.args.get("sort_by", "created_at")
+        sort_order = request.args.get("sort_order", "desc")
         
         # Calculate offset from page if provided
         if request.args.get("page"):
             offset = (page - 1) * limit
         
-        # Get total count for pagination metadata
+        # Build base query
         session = db.connection.session
-        total_count = session.query(Transaction).join(
+        base_query = session.query(Transaction).join(
             Account, Transaction.account_id == Account.id
-        ).filter(
-            Account.user_id == user_id
-        ).count()
+        ).filter(Account.user_id == user_id)
         
-        # Get transactions
-        txs = get_transaction_history(user_id, currency, session, limit=limit, offset=offset)
+        # Apply filters
+        if currency:
+            base_query = base_query.filter(Account.currency == currency.upper())
+        
+        if status:
+            base_query = base_query.filter(Transaction.status == status.upper())
+        
+        if tx_type:
+            base_query = base_query.filter(Transaction.type == tx_type.lower())
+        
+        if date_from:
+            try:
+                from datetime import datetime
+                date_from_obj = datetime.strptime(date_from, '%Y-%m-%d')
+                base_query = base_query.filter(Transaction.created_at >= date_from_obj)
+            except ValueError:
+                pass  # Invalid date format, ignore filter
+        
+        if date_to:
+            try:
+                from datetime import datetime, timedelta
+                date_to_obj = datetime.strptime(date_to, '%Y-%m-%d') + timedelta(days=1)
+                base_query = base_query.filter(Transaction.created_at < date_to_obj)
+            except ValueError:
+                pass  # Invalid date format, ignore filter
+        
+        if search:
+            search_term = f"%{search}%"
+            base_query = base_query.filter(
+                db.or_(
+                    Transaction.description.ilike(search_term),
+                    Transaction.blockchain_txid.ilike(search_term),
+                    Transaction.address.ilike(search_term)
+                )
+            )
+        
+        # Get total count for pagination
+        total_count = base_query.count()
+        
+        # Apply sorting
+        if sort_by == "amount":
+            if sort_order == "asc":
+                base_query = base_query.order_by(Transaction.amount.asc())
+            else:
+                base_query = base_query.order_by(Transaction.amount.desc())
+        elif sort_by == "status":
+            if sort_order == "asc":
+                base_query = base_query.order_by(Transaction.status.asc())
+            else:
+                base_query = base_query.order_by(Transaction.status.desc())
+        else:  # Default to created_at
+            if sort_order == "asc":
+                base_query = base_query.order_by(Transaction.created_at.asc())
+            else:
+                base_query = base_query.order_by(Transaction.created_at.desc())
+        
+        # Apply pagination
+        txs = base_query.offset(offset).limit(limit).all()
         
         # Calculate pagination metadata
         total_pages = (total_count + limit - 1) // limit
@@ -2657,8 +3039,30 @@ def wallet_transactions():
             next_offset = offset + limit
             pagination_links["next"] = f"{base_url}?{dict(params, page=next_page, offset=next_offset)}"
         
+        # Enhanced transaction serialization with currency info
+        transactions_data = []
+        for tx in txs:
+            tx_dict = model_to_dict(tx)
+            # Add currency from the related account
+            currency = tx.account.currency if tx.account else None
+            tx_dict['currency'] = currency
+            
+            # Fix amount display using unified system for crypto currencies
+            if currency and tx.amount_smallest_unit is not None:
+                try:
+                    from shared.currency_precision import AmountConverter
+                    # Use proper amount conversion for display
+                    proper_amount = AmountConverter.from_smallest_units(tx.amount_smallest_unit, currency)
+                    tx_dict['amount'] = float(proper_amount)
+                    # Also add formatted amount for display
+                    tx_dict['formatted_amount'] = AmountConverter.format_display_amount(tx.amount_smallest_unit, currency)
+                except Exception as e:
+                    logger.warning(f"Failed to convert amount for currency {currency}: {e}")
+            
+            transactions_data.append(tx_dict)
+        
         response_data = {
-            "transactions": [model_to_dict(tx) for tx in txs],
+            "transactions": transactions_data,
             "pagination": {
                 "page": page,
                 "limit": limit,
@@ -2673,6 +3077,119 @@ def wallet_transactions():
         
         return jsonify(response_data), 200
     except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/wallet/transactions/<int:transaction_id>", methods=["GET"])
+@token_required
+def get_transaction_details(transaction_id):
+    try:
+        user_id = g.user.id
+        session = db.connection.session
+        
+        # Debug: Check if transaction exists at all
+        transaction_exists = session.query(Transaction).filter(Transaction.id == transaction_id).first()
+        app.logger.debug(f"DEBUG: Transaction {transaction_id} exists: {transaction_exists is not None}")
+        
+        if transaction_exists:
+            app.logger.debug(f"DEBUG: Transaction {transaction_id} account_id: {transaction_exists.account_id}")
+            # Check if account belongs to user
+            account = session.query(Account).filter(Account.id == transaction_exists.account_id).first()
+            if account:
+                app.logger.debug(f"DEBUG: Account {account.id} belongs to user {account.user_id}, current user: {user_id}")
+        
+        # Get transaction with account details
+        transaction = session.query(Transaction).join(
+            Account, Transaction.account_id == Account.id
+        ).filter(
+            Transaction.id == transaction_id,
+            Account.user_id == user_id
+        ).first()
+        
+        if not transaction:
+            return jsonify({
+                "error": "Transaction not found or you don't have permission to view it",
+                "debug": {
+                    "transaction_id": transaction_id,
+                    "user_id": user_id,
+                    "transaction_exists": transaction_exists is not None
+                }
+            }), 404
+        
+        # Get account details
+        account = session.query(Account).filter(Account.id == transaction.account_id).first()
+        
+        # Enhanced transaction serialization with currency info
+        transaction_dict = model_to_dict(transaction)
+        currency = transaction.account.currency if transaction.account else None
+        transaction_dict['currency'] = currency
+        
+        # Fix amount display using unified system for crypto currencies
+        if currency and transaction.amount_smallest_unit is not None:
+            try:
+                from shared.currency_precision import AmountConverter
+                # Use proper amount conversion for display
+                proper_amount = AmountConverter.from_smallest_units(transaction.amount_smallest_unit, currency)
+                transaction_dict['amount'] = float(proper_amount)
+                # Also add formatted amount for display
+                transaction_dict['formatted_amount'] = AmountConverter.format_display_amount(transaction.amount_smallest_unit, currency)
+            except Exception as e:
+                logger.warning(f"Failed to convert amount for currency {currency}: {e}")
+        
+        response_data = {
+            "transaction": {
+                **transaction_dict,
+                "account": {
+                    "id": account.id,
+                    "currency": account.currency,
+                    "account_type": account.account_type.value if account.account_type else None
+                } if account else None
+            }
+        }
+        
+        return jsonify(response_data), 200
+    except Exception as e:
+        app.logger.error(f"ERROR: Exception in get_transaction_details: {str(e)}")
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/wallet/pnl", methods=["GET"])
+@token_required
+def get_user_pnl():
+    """Get user PnL based on actual transaction costs from ledger"""
+    try:
+        from pnl_service import WalletPnLService
+        
+        user_id = g.user.id
+        currency = request.args.get('currency')
+        period_days = int(request.args.get('period_days', 1))
+        
+        result = WalletPnLService.get_user_pnl(user_id, currency, period_days)
+        
+        if result['success']:
+            return jsonify(result['data']), 200
+        else:
+            return jsonify({"error": result['error']}), 400
+            
+    except Exception as e:
+        app.logger.error(f"Error in get_user_pnl: {str(e)}")
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/wallet/portfolio-summary", methods=["GET"])
+@token_required
+def get_portfolio_summary():
+    """Get portfolio summary with accurate PnL based on cost basis"""
+    try:
+        from pnl_service import WalletPnLService
+        
+        user_id = g.user.id
+        result = WalletPnLService.get_portfolio_summary(user_id)
+        
+        if result['success']:
+            return jsonify(result['data']), 200
+        else:
+            return jsonify({"error": result['error']}), 400
+            
+    except Exception as e:
+        app.logger.error(f"Error in get_portfolio_summary: {str(e)}")
         return jsonify({"error": str(e)}), 400
 
 @app.route('/wallet/balance', methods=['GET'])
@@ -2796,10 +3313,26 @@ def admin_get_user_wallet(user_id):
             return jsonify({'error': 'Account not found for user'}), 404
         balance = get_balance(user_id, session)
         transactions = get_transaction_history(user_id, "UGX", session, limit=10, offset=0)
+        
+        # Fix transaction amounts using unified system
+        transactions_data = []
+        for tx in transactions:
+            tx_dict = model_to_dict(tx)
+            currency = tx.account.currency if tx.account else None
+            if currency and tx.amount_smallest_unit is not None:
+                try:
+                    from shared.currency_precision import AmountConverter
+                    proper_amount = AmountConverter.from_smallest_units(tx.amount_smallest_unit, currency)
+                    tx_dict['amount'] = float(proper_amount)
+                    tx_dict['formatted_amount'] = AmountConverter.format_display_amount(tx.amount_smallest_unit, currency)
+                except Exception as e:
+                    logger.warning(f"Failed to convert amount for currency {currency}: {e}")
+            transactions_data.append(tx_dict)
+        
         return jsonify({
             'account': model_to_dict(account),
             'balance': balance,
-            'transactions': [model_to_dict(tx) for tx in transactions]
+            'transactions': transactions_data
         }), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 400
@@ -3004,10 +3537,26 @@ def admin_get_all_user_wallets(user_id):
                 .filter(db.wallet.Transaction.account_id == account.id) \
                 .order_by(db.wallet.Transaction.created_at.desc()) \
                 .limit(10).all()
+            
+            # Fix transaction amounts using unified system
+            transactions_data = []
+            for tx in transactions:
+                tx_dict = model_to_dict(tx)
+                currency = tx.account.currency if tx.account else None
+                if currency and tx.amount_smallest_unit is not None:
+                    try:
+                        from shared.currency_precision import AmountConverter
+                        proper_amount = AmountConverter.from_smallest_units(tx.amount_smallest_unit, currency)
+                        tx_dict['amount'] = float(proper_amount)
+                        tx_dict['formatted_amount'] = AmountConverter.format_display_amount(tx.amount_smallest_unit, currency)
+                    except Exception as e:
+                        logger.warning(f"Failed to convert amount for currency {currency}: {e}")
+                transactions_data.append(tx_dict)
+            
             result.append({
                 'account': model_to_dict(account),
                 'balance': balance,
-                'transactions': [model_to_dict(tx) for tx in transactions]
+                'transactions': transactions_data
             })
         return jsonify({'accounts': result}), 200
     except Exception as e:
@@ -3371,20 +3920,7 @@ def control_background_price_service():
         }), 500
 
 
-# Portfolio and Ledger Endpoints
-@app.route('/wallet/portfolio/summary', methods=['GET'])
-@token_required
-def get_portfolio_summary():
-    """Get comprehensive portfolio summary for authenticated user"""
-    try:
-        from portfolio_service import get_portfolio_summary as get_user_portfolio
-        
-        result = get_user_portfolio(db.connection.session, g.user.id)
-        return jsonify(result), 200
-        
-    except Exception as e:
-        app.logger.error(f"Failed to get portfolio summary: {str(e)}")
-        return jsonify({"error": "Failed to get portfolio summary"}), 500
+# Portfolio and Ledger Endpoints - Removed duplicate route
 
 
 @app.route('/wallet/portfolio/analysis/<period>', methods=['GET'])
@@ -4515,6 +5051,152 @@ def clear_reserve_cache():
     except Exception as e:
         app.logger.error(f"Error in reserve cache clear endpoint: {e}")
         return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/wallet/crypto/balances', methods=['GET'])
+@token_required
+def get_crypto_balances(current_user):
+    """Get user's aggregated crypto balances across all supported cryptocurrencies with multi-chain support"""
+    try:
+        session = db.connection.get_session()
+        
+        # Import the balance aggregation service
+        from shared.balance_aggregation import BalanceAggregationService
+        
+        # Initialize the balance aggregation service
+        balance_service = BalanceAggregationService(session)
+        
+        # Get aggregated balances
+        aggregated_balances = balance_service.get_user_aggregated_balances(current_user.id)
+        
+        # Get current crypto prices
+        try:
+            cached_prices = get_cached_prices()
+        except:
+            cached_prices = {}
+        
+        # Calculate portfolio value
+        portfolio_value = balance_service.get_portfolio_value(current_user.id, cached_prices, 'UGX')
+        
+        # Format response for UI compatibility
+        balances = {}
+        
+        for currency, balance_info in aggregated_balances.items():
+            # Get primary address for this currency (first available address)
+            primary_address = None
+            primary_memo = None
+            
+            if balance_info['addresses']:
+                primary_addr = balance_info['addresses'][0]
+                primary_address = primary_addr['address']
+                primary_memo = primary_addr.get('memo')
+            
+            # Build balance entry with aggregated information
+            balance_entry = {
+                'balance': balance_info['total_balance'],
+                'address': primary_address,
+                'memo': primary_memo,
+                'chains': balance_info['chains'],  # Show breakdown by chain
+                'all_addresses': balance_info['addresses']  # All addresses across chains
+            }
+            
+            # Add price and value information if available
+            if currency in cached_prices and cached_prices[currency] is not None:
+                price_usd = cached_prices[currency]
+                try:
+                    usd_to_ugx_rate = forex_service.get_exchange_rate('usd', 'ugx')
+                except Exception:
+                    usd_to_ugx_rate = 3700  # Fallback rate
+                price_ugx = price_usd * usd_to_ugx_rate
+                
+                balance_entry.update({
+                    'price_usd': price_usd,
+                    'price_ugx': price_ugx,
+                    'value_usd': balance_info['total_balance'] * price_usd,
+                    'value_ugx': balance_info['total_balance'] * price_ugx
+                })
+            
+            balances[currency] = balance_entry
+        
+        # Add any missing supported currencies with zero balance for UI consistency
+        supported_cryptos = ['BTC', 'ETH', 'SOL', 'BNB', 'USDT', 'USDC', 'TRX', 'LTC']
+        for crypto in supported_cryptos:
+            if crypto not in balances:
+                balances[crypto] = {
+                    'balance': 0.0,
+                    'address': None,
+                    'memo': None,
+                    'chains': {},
+                    'all_addresses': []
+                }
+        
+        return jsonify({
+            "success": True,
+            "balances": balances,
+            "total_value_usd": portfolio_value['total_value_usd'],
+            "total_value_ugx": portfolio_value['total_value_target'],
+            "portfolio_breakdown": portfolio_value['currencies'],
+            "aggregation_summary": balance_service.get_balance_summary(current_user.id)
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Error getting aggregated crypto balances: {e}")
+        app.logger.error(traceback.format_exc())
+        return jsonify({"success": False, "error": str(e)}), 400
+    finally:
+        if 'session' in locals():
+            session.close()
+
+@app.route('/api/wallet/crypto/balances/detailed', methods=['GET'])
+@token_required
+def get_detailed_crypto_balances(current_user):
+    """Get detailed aggregated crypto balances with full multi-chain breakdown"""
+    try:
+        session = db.connection.get_session()
+        
+        # Import the balance aggregation service
+        from shared.balance_aggregation import BalanceAggregationService
+        
+        # Initialize the balance aggregation service
+        balance_service = BalanceAggregationService(session)
+        
+        # Get aggregated balances
+        aggregated_balances = balance_service.get_user_aggregated_balances(current_user.id)
+        
+        # Get current crypto prices
+        try:
+            cached_prices = get_cached_prices()
+        except:
+            cached_prices = {}
+        
+        # Calculate portfolio value
+        portfolio_value = balance_service.get_portfolio_value(current_user.id, cached_prices, 'UGX')
+        
+        # Get balance summary
+        balance_summary = balance_service.get_balance_summary(current_user.id)
+        
+        return jsonify({
+            "success": True,
+            "aggregated_balances": aggregated_balances,
+            "portfolio_value": portfolio_value,
+            "balance_summary": balance_summary,
+            "multi_chain_details": {
+                currency: {
+                    "total_balance": info['total_balance'],
+                    "chain_breakdown": info['chains'],
+                    "addresses_by_chain": info['addresses']
+                }
+                for currency, info in aggregated_balances.items()
+                if len(info['chains']) > 1  # Only show multi-chain tokens
+            }
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Error getting detailed crypto balances: {e}")
+        app.logger.error(traceback.format_exc())
+        return jsonify({"success": False, "error": str(e)}), 400
+    finally:
+        if 'session' in locals():
+            session.close()
 
 @app.route('/api/v1/wallet/dashboard/summary', methods=['GET'])
 @token_required

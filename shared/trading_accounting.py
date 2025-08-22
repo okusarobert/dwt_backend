@@ -71,28 +71,32 @@ class TradingAccountingService:
         self.session.add(journal_entry)
         self.session.flush()  # Get the ID
         
-        # Create ledger transactions using smallest units
+        # Convert to standard amount for ledger
+        buy_amount_standard = AmountConverter.from_smallest_units(crypto_amount_smallest_unit, crypto_currency)
+        buy_amount_fiat_standard = AmountConverter.from_smallest_units(fiat_amount_smallest_unit, fiat_currency)
+        
+        # Create ledger transactions using standard amounts
         ledger_transactions = [
             # Debit crypto asset account (increase crypto holdings)
             LedgerTransaction(
                 journal_entry_id=journal_entry.id,
                 account_id=crypto_account.id,
-                debit_smallest_unit=crypto_amount_smallest_unit,
-                credit_smallest_unit=0
+                debit=buy_amount_standard,
+                credit=Decimal('0')
             ),
             # Debit trading fee expense
             LedgerTransaction(
                 journal_entry_id=journal_entry.id,
                 account_id=fee_expense_account.id,
-                debit_smallest_unit=fee_amount_smallest_unit,
-                credit_smallest_unit=0
+                debit=AmountConverter.from_smallest_units(fee_amount_smallest_unit, fee_currency),
+                credit=Decimal('0')
             ),
             # Credit fiat account (decrease fiat balance)
             LedgerTransaction(
                 journal_entry_id=journal_entry.id,
                 account_id=fiat_account.id,
-                debit_smallest_unit=0,
-                credit_smallest_unit=fiat_amount_smallest_unit + fee_amount_smallest_unit
+                debit=Decimal('0'),
+                credit=buy_amount_fiat_standard
             )
         ]
         
@@ -141,28 +145,32 @@ class TradingAccountingService:
         self.session.add(journal_entry)
         self.session.flush()  # Get the ID
         
-        # Create ledger transactions using smallest units
+        # Convert to standard amount for ledger
+        sell_amount_standard = AmountConverter.from_smallest_units(crypto_amount_smallest_unit, crypto_currency)
+        sell_amount_fiat_standard = AmountConverter.from_smallest_units(fiat_amount_smallest_unit, fiat_currency)
+        
+        # Create ledger transactions using standard amounts
         ledger_transactions = [
             # Debit fiat account (increase fiat balance)
             LedgerTransaction(
                 journal_entry_id=journal_entry.id,
                 account_id=fiat_account.id,
-                debit_smallest_unit=fiat_amount_smallest_unit - fee_amount_smallest_unit,
-                credit_smallest_unit=0
+                debit=sell_amount_fiat_standard,
+                credit=Decimal('0')
             ),
             # Debit trading fee expense
             LedgerTransaction(
                 journal_entry_id=journal_entry.id,
                 account_id=fee_expense_account.id,
-                debit_smallest_unit=fee_amount_smallest_unit,
-                credit_smallest_unit=0
+                debit=AmountConverter.from_smallest_units(fee_amount_smallest_unit, fee_currency),
+                credit=Decimal('0')
             ),
             # Credit crypto asset account (decrease crypto holdings)
             LedgerTransaction(
                 journal_entry_id=journal_entry.id,
                 account_id=crypto_account.id,
-                debit_smallest_unit=0,
-                credit_smallest_unit=crypto_amount_smallest_unit
+                debit=Decimal('0'),
+                credit=sell_amount_standard
             )
         ]
         
@@ -199,20 +207,24 @@ class TradingAccountingService:
         self.session.add(journal_entry)
         self.session.flush()
         
+        # Convert to standard amount for ledger
+        fee_amount_standard = AmountConverter.from_smallest_units(fee_amount_smallest_unit, fee_currency)
+        
+        # Create ledger transactions using standard amounts
         ledger_transactions = [
             # Debit cash account (platform receives fee)
             LedgerTransaction(
                 journal_entry_id=journal_entry.id,
                 account_id=cash_account.id,
-                debit_smallest_unit=fee_amount_smallest_unit,
-                credit_smallest_unit=0
+                debit=fee_amount_standard,
+                credit=Decimal('0')
             ),
             # Credit revenue account
             LedgerTransaction(
                 journal_entry_id=journal_entry.id,
                 account_id=revenue_account.id,
-                debit_smallest_unit=0,
-                credit_smallest_unit=fee_amount_smallest_unit
+                debit=Decimal('0'),
+                credit=fee_amount_standard
             )
         ]
         

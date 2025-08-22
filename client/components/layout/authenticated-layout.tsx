@@ -26,6 +26,24 @@ export function AuthenticatedLayout({
     }
   }, [isAuthenticated, isLoading, router]);
 
+  // Check if user needs email verification
+  useEffect(() => {
+    const checkVerificationCookie = () => {
+      const cookies = document.cookie.split(';');
+      const verificationRequired = cookies.find(cookie => 
+        cookie.trim().startsWith('email-verification-required=')
+      );
+      
+      if (verificationRequired && verificationRequired.includes('true')) {
+        router.push('/auth/verify-email');
+      }
+    };
+
+    if (!isLoading && isAuthenticated) {
+      checkVerificationCookie();
+    }
+  }, [isAuthenticated, isLoading, router]);
+
   // Show loading while checking authentication
   if (isLoading) {
     return (
@@ -46,7 +64,7 @@ export function AuthenticatedLayout({
   return (
     <div className="min-h-screen bg-background">
       <Navigation />
-      <main className="pt-16">{children}</main>
+      <main className="pt-1">{children}</main>
     </div>
   );
 }

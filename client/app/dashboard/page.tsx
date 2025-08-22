@@ -36,6 +36,11 @@ interface DashboardData {
   portfolio_change_24h_pct: number;
   total_assets: number;
   recent_activity: Activity[];
+  portfolio_details?: any;
+  multi_chain_summary?: {
+    total_currencies: number;
+    multi_chain_tokens: Record<string, any>;
+  };
 }
 
 const formatCurrency = (value: number, currency: string = "USD"): string => {
@@ -75,8 +80,22 @@ function DashboardContent() {
       if (!user) return;
       try {
         setIsLoadingData(true);
-        const response = await apiClient.getDashboardSummary();
-        setDashboardData(response.data);
+        
+        // Fetch both dashboard summary and detailed crypto balances
+        const [dashboardResponse, balancesResponse] = await Promise.all([
+          apiClient.getDashboardSummary(),
+          apiClient.getDetailedCryptoBalances().catch(() => null) // Fallback if detailed balances fail
+        ]);
+        
+        // Enhance dashboard data with portfolio information
+        const enhancedData = {
+          ...dashboardResponse.data,
+          portfolio_details: balancesResponse,
+          total_portfolio_value: balancesResponse?.portfolio_value?.total_value_usd || dashboardResponse.data.total_portfolio_value,
+          multi_chain_summary: balancesResponse?.balance_summary
+        };
+        
+        setDashboardData(enhancedData);
         setError(null);
       } catch (err) {
         console.error("Failed to fetch dashboard data:", err);
@@ -178,9 +197,14 @@ function DashboardContent() {
                     <DollarSign className="w-6 h-6 text-muted-foreground" />
                   </div>
                   <p className="text-3xl font-bold text-foreground">
-                    {dashboardData.total_assets}
+                    {dashboardData.multi_chain_summary?.total_currencies || dashboardData.total_assets}
                   </p>
-                  <p className="text-sm text-muted-foreground mt-4">Across all wallets</p>
+                  <p className="text-sm text-muted-foreground mt-4">
+                    {dashboardData.multi_chain_summary ? 
+                      `${Object.keys(dashboardData.multi_chain_summary.multi_chain_tokens).length} multi-chain tokens` :
+                      'Across all wallets'
+                    }
+                  </p>
                 </div>
               </Card>
 
@@ -197,6 +221,49 @@ function DashboardContent() {
                 </div>
               </Card>
             </motion.div>
+
+            {/* Portfolio Breakdown */}
+            {dashboardData.portfolio_details && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.6, delay: 0.3 }}
+                className="mb-8"
+              >
+                <h2 className="text-xl font-semibold text-foreground mb-4">
+                  Portfolio Breakdown
+                </h2>
+                <Card className="p-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {Object.entries(dashboardData.portfolio_details.portfolio_breakdown || {})
+                      .filter(([_, data]: [string, any]) => data.balance > 0)
+                      .map(([currency, data]: [string, any]) => (
+                        <div key={currency} className="flex items-center justify-between p-4 bg-muted rounded-lg">
+                          <div>
+                            <div className="font-semibold text-foreground">{currency}</div>
+                            <div className="text-sm text-muted-foreground">
+                              {data.balance.toFixed(6)} {currency}
+                              {data.chains && Object.keys(data.chains).length > 1 && (
+                                <span className="ml-2 text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded">
+                                  {Object.keys(data.chains).length} chains
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="font-medium text-foreground">
+                              ${data.value_usd.toFixed(2)}
+                            </div>
+                            <div className="text-sm text-muted-foreground">
+                              ${data.price_usd.toFixed(2)}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </Card>
+              </motion.div>
+            )}
 
             {/* Real-Time Crypto Prices */}
             <motion.div

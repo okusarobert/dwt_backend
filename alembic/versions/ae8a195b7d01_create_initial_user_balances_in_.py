@@ -19,6 +19,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     bind = op.get_bind()
+    
+    # Commit any pending enum changes first
+    bind.commit()
+    
     meta = sa.MetaData()
     meta.reflect(bind=bind)
 

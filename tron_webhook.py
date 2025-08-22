@@ -117,7 +117,7 @@ def handle_tron_transfer_event(webhook_data: dict):
             from_address=from_address,
             to_address=to_address,
             status=TransactionStatus.AWAITING_CONFIRMATION,
-            provider=PaymentProvider.TRONGRID,
+            provider=PaymentProvider.CRYPTO,
             metadata_json={
                 "block_number": parsed_data["block_number"],
                 "timestamp": parsed_data["timestamp"],
@@ -226,7 +226,7 @@ def handle_tron_contract_log_event(webhook_data: dict):
             from_address=parsed_data["from_address"],
             to_address=parsed_data["to_address"],
             status=TransactionStatus.AWAITING_CONFIRMATION,
-            provider=PaymentProvider.TRONGRID,
+            provider=PaymentProvider.CRYPTO,
             metadata_json={
                 "block_number": parsed_data["block_number"],
                 "timestamp": parsed_data["timestamp"],

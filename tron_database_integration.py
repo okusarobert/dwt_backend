@@ -64,7 +64,7 @@ class TronDatabaseIntegration:
                 tx_type=tx_type,
                 status=status,
                 timestamp=tx_datetime,
-                provider=PaymentProvider.TRONGRID,
+                provider=PaymentProvider.CRYPTO,
                 block_number=block_number,
                 fee=fee,
                 currency='TRX'
@@ -119,7 +119,7 @@ class TronDatabaseIntegration:
                 tx_type=tx_type,
                 status=TransactionStatus.CONFIRMED,  # TRC20 transactions are usually confirmed
                 timestamp=tx_datetime,
-                provider=PaymentProvider.TRONGRID,
+                provider=PaymentProvider.CRYPTO,
                 currency=f"{token_symbol} ({token_name})"
             )
             

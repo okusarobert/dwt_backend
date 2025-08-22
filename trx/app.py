@@ -9,9 +9,11 @@ Tron (TRX) Deposit and Confirmation Monitor
 import os
 import time
 import logging
+import threading
+import traceback
+from decimal import Decimal
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Tuple
-from decimal import Decimal
 
 from decouple import config
 from sqlalchemy.orm import Session
@@ -28,6 +30,13 @@ from tronpy import tron as tron_utils
 # tron_utils.to_base58check_address(bytes.fromhex(hex_str))
 
 logger = setup_logging()
+
+try:
+    from notification_integration import trx_notification_service
+    logger.info("✅ Successfully imported trx_notification_service")
+except ImportError as e:
+    logger.error(f"❌ Failed to import trx_notification_service: {e}")
+    trx_notification_service = None
 
 
 @dataclass
@@ -48,7 +57,10 @@ class TronMonitor:
         self.cfg = TronWalletConfig.testnet(api_key) if network != 'mainnet' else TronWalletConfig.mainnet(api_key)
         # Dummy user 0; wallet methods that need user_id won't be used except helpers
         session = get_session()
-        self.client = TronWallet(user_id=0, tron_config=self.cfg, session=session, logger=logger)
+        try:
+            self.client = TronWallet(user_id=0, tron_config=self.cfg, session=session, logger=logger)
+        finally:
+            session.close()
         self.poll_secs = int(os.getenv('TRX_POLL_SECS', '20'))
         self.required_confirmations = int(os.getenv('TRX_REQUIRED_CONFIRMATIONS', '20'))
         # Comma-separated list of TRC20 USDT contract addresses to track (base58)
@@ -243,41 +255,68 @@ class TronMonitor:
         
         session = get_session()
         try:
+            # Re-query the crypto address within this session to ensure it's bound
+            crypto_address = session.query(CryptoAddress).filter_by(
+                address=addr.address,
+                currency_code="TRX",
+                is_active=True
+            ).first()
+            
+            if not crypto_address:
+                logger.error(f"❌ Crypto address not found: {addr.address}")
+                return
+
+            # Initialize accounting service with session
+            accounting_service = TradingAccountingService(session)
+            
+            # Create transaction record
             t = Transaction(
-                account_id=addr.account_id,
+                account_id=crypto_address.account_id,
                 reference_id=tx.tx_hash,
                 amount=float(tx.value_trx),
                 amount_smallest_unit=amount_sun,
+                precision_config={
+                    "currency": "TRX",
+                    "decimals": 6,
+                    "smallest_unit": "sun"
+                },
                 type=TransactionType.DEPOSIT,
                 status=TransactionStatus.AWAITING_CONFIRMATION,
-                description=f"Tron transaction {tx.tx_hash[:8]}...",
-                blockchain_txid=tx.tx_hash,
-                confirmations=0,
-                required_confirmations=self.required_confirmations,
                 address=addr.address,
-                provider=PaymentProvider.CRYPTO,
+                blockchain_txid=tx.tx_hash,
                 metadata_json={
                     "from_address": tx.from_address,
                     "to_address": tx.to_address,
                     "block_number": tx.block_number,
-                    "amount_sun": str(amount_sun),
-                    "amount_trx": str(tx.value_trx),
-                    "currency": "TRX",
-                    "unified_system": True,
                     "reservation_reference": res_ref,
-                }
+                },
             )
             session.add(t)
             
-            # Create accounting journal entry
-            try:
-                accounting_service = TradingAccountingService(session)
-                self._create_accounting_entry(t, tx, addr, accounting_service, False)  # False = deposit
-            except Exception as e:
-                logger.error(f"⚠️ Failed to create TRX accounting entry: {e}")
+            # Create accounting entry
+            self._create_accounting_entry(t, tx, crypto_address, accounting_service, is_withdrawal=False)
             
             session.commit()
-            logger.info("💾 Recorded TRX deposit with unified system %s -> %s: %s", tx.from_address, tx.to_address, AmountConverter.format_display_amount(amount_sun, "TRX"))
+            logger.info("💾 Recorded TRX deposit %s -> %s: %s TRX", tx.from_address, tx.to_address, tx.value_trx)
+            
+            # Send notification if available
+            if trx_notification_service:
+                try:
+                    result = trx_notification_service.send_deposit_notification(
+                        user_id=crypto_address.account.user_id,
+                        transaction_hash=tx.tx_hash,
+                        amount=Decimal(str(tx.value_trx)),
+                        wallet_address=tx.to_address,
+                        block_number=tx.block_number,
+                        confirmations=0
+                    )
+                    logger.info(f"🔔 TRX notification result: {result}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to send TRX deposit notification: {e}")
+                    import traceback
+                    logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            else:
+                logger.warning("⚠️ TRX notification service not available - skipping notification")
         except Exception as e:
             session.rollback()
             # Ignore duplicate unique constraint errors
@@ -285,80 +324,89 @@ class TronMonitor:
         finally:
             session.close()
 
-    def _create_accounting_entry(self, transaction: Transaction, tx: TrxTx, crypto_address: CryptoAddress, accounting_service: TradingAccountingService, is_withdrawal: bool):
-        """Create accounting journal entry for the TRX transaction"""
+    def _create_accounting_entry(self, transaction: Transaction, event, crypto_address: CryptoAddress, accounting_service: TradingAccountingService, is_withdrawal: bool):
+        """Create accounting journal entry for the transaction"""
+        # Note: session is passed via accounting_service, no need to create new session
         try:
-            # Get or create crypto asset account
-            crypto_account_name = f"Crypto Assets - TRX"
-            crypto_account = accounting_service.get_account_by_name(crypto_account_name)
+            from shared.currency_precision import AmountConverter
+            from shared.crypto.price_utils import get_crypto_price
+            from shared.fiat.forex_service import ForexService
             
-            if not crypto_account:
-                logger.warning(f"⚠️ Crypto asset account not found: {crypto_account_name}")
+            # Get current crypto price in USD and UGX at transaction time
+            try:
+                trx_price_usd = get_crypto_price("TRX")
+                if not trx_price_usd:
+                    logger.warning("❌ Could not get TRX price in USD")
+                    return
+                
+                # Get USD to UGX exchange rate
+                forex_service = ForexService()
+                usd_to_ugx = forex_service.get_exchange_rate('USD', 'UGX')
+                
+                trx_price_ugx = trx_price_usd * usd_to_ugx
+                
+                # Store price metadata in transaction
+                if not transaction.metadata_json:
+                    transaction.metadata_json = {}
+                transaction.metadata_json.update({
+                    "trx_price_usd_at_time": trx_price_usd,
+                    "trx_price_ugx_at_time": trx_price_ugx,
+                    "usd_to_ugx_rate_at_time": usd_to_ugx
+                })
+                
+                logger.info(f"💰 TRX price at transaction time: ${trx_price_usd:.4f} USD, {trx_price_ugx:.2f} UGX")
+                
+            except Exception as e:
+                logger.error(f"❌ Error getting TRX price: {e}")
                 return
             
-            # Create journal entry description
-            direction = "withdrawal" if is_withdrawal else "deposit"
-            amount_display = AmountConverter.format_display_amount(transaction.amount_smallest_unit, "TRX")
-            description = f"TRX {direction} - {amount_display} (TX: {tx.tx_hash[:8]}...)"
+            # Convert amount to standard units for accounting
+            amount_standard = AmountConverter.from_smallest_units(transaction.amount_smallest_unit, "TRX")
             
             # Create journal entry
-            journal_entry = JournalEntry(description=description)
-            session = get_session()
-            session.add(journal_entry)
-            session.flush()  # Get ID
+            journal_entry = JournalEntry(
+                description=f"TRX {'withdrawal' if is_withdrawal else 'deposit'} - {transaction.blockchain_txid}"
+            )
+            accounting_service.session.add(journal_entry)
+            accounting_service.session.flush()  # Get the journal entry ID
             
-            # Create ledger transactions based on direction
-            if is_withdrawal:
-                # Debit: Pending settlements (liability), Credit: Crypto assets
-                pending_account = accounting_service.get_account_by_name("Pending Trade Settlements")
-                if pending_account:
-                    # Debit pending settlements
-                    debit_tx = LedgerTransaction(
-                        journal_entry_id=journal_entry.id,
-                        account_id=pending_account.id,
-                        debit_smallest_unit=transaction.amount_smallest_unit,
-                        credit_smallest_unit=0
-                    )
-                    session.add(debit_tx)
-                    
-                    # Credit crypto assets
-                    credit_tx = LedgerTransaction(
-                        journal_entry_id=journal_entry.id,
-                        account_id=crypto_account.id,
-                        debit_smallest_unit=0,
-                        credit_smallest_unit=transaction.amount_smallest_unit
-                    )
-                    session.add(credit_tx)
+            # Get accounting accounts
+            crypto_asset_account = accounting_service.session.query(AccountingAccount).filter_by(
+                name="Crypto Assets - TRX"
+            ).first()
+            
+            user_liability_account = accounting_service.session.query(AccountingAccount).filter_by(
+                name="User Liabilities - TRX"
+            ).first()
+            
+            if crypto_asset_account and user_liability_account:
+                # Debit crypto assets (increase what we hold)
+                debit_tx = LedgerTransaction(
+                    journal_entry_id=journal_entry.id,
+                    account_id=crypto_asset_account.id,
+                    debit=amount_standard,
+                    credit=Decimal('0')
+                )
+                accounting_service.session.add(debit_tx)
+                
+                # Credit user liabilities (increase what we owe user)
+                credit_tx = LedgerTransaction(
+                    journal_entry_id=journal_entry.id,
+                    account_id=user_liability_account.id,
+                    debit=Decimal('0'),
+                    credit=amount_standard
+                )
+                accounting_service.session.add(credit_tx)
+                logger.info(f"✅ Created ledger transactions for TRX deposit")
             else:
-                # Deposit: Debit crypto assets, Credit pending settlements
-                pending_account = accounting_service.get_account_by_name("Pending Trade Settlements")
-                if pending_account:
-                    # Debit crypto assets
-                    debit_tx = LedgerTransaction(
-                        journal_entry_id=journal_entry.id,
-                        account_id=crypto_account.id,
-                        debit_smallest_unit=transaction.amount_smallest_unit,
-                        credit_smallest_unit=0
-                    )
-                    session.add(debit_tx)
-                    
-                    # Credit pending settlements
-                    credit_tx = LedgerTransaction(
-                        journal_entry_id=journal_entry.id,
-                        account_id=pending_account.id,
-                        debit_smallest_unit=0,
-                        credit_smallest_unit=transaction.amount_smallest_unit
-                    )
-                    session.add(credit_tx)
-            
+                logger.error(f"❌ TRX accounting accounts not found - no ledger transactions created!")
+        
             # Link transaction to journal entry
             transaction.journal_entry_id = journal_entry.id
-            
-            logger.info(f"📊 Created TRX accounting entry: {description}")
-            session.close()
-            
+        
         except Exception as e:
             logger.error(f"❌ Error creating TRX accounting entry: {e}")
+            accounting_service.session.rollback()
             raise
 
     def fetch_trc20_for(self, address: str, limit: int = 20) -> List[Dict]:

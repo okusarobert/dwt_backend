@@ -102,13 +102,13 @@ def handle_reset_password(payload: str):
     data = json.loads(payload)
     email = data["email"]
     
-    user = User.query.filter(User.email == email.lower()).first()
+    user = session.query(User).filter(User.email == email.lower()).first()
     if not user:
         logger.error(f"User not found for email: {email}")
         return
 
     # Check for existing pending code
-    existing_code = ForgotPassword.query.filter(
+    existing_code = session.query(ForgotPassword).filter(
         ForgotPassword.user_id == user.id,
         ForgotPassword.status == ForgotPasswordStatus.PENDING
     ).first()
@@ -136,7 +136,7 @@ def handle_reset_password(payload: str):
         with open(file_path, "r") as file:
             content = file.read()
         
-        html_content = content.replace("{code}", code)
+        html_content = content.replace("{code}", str(code))
         
         # Try Resend first, fallback to SMTP
         success = send_email_with_resend(recipient, subject, html_content, user.first_name)
@@ -201,7 +201,7 @@ def handle_email_verification(payload: str):
         with open(file_path, "r") as file:
             content = file.read()
         
-        html_content = content.replace("{code}", code)
+        html_content = content.replace("{code}", str(code))
         
         # Try Resend first, fallback to SMTP
         success = send_email_with_resend(recipient, subject, html_content, user.first_name)

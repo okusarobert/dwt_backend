@@ -121,3 +121,10 @@ curl -X POST http://localhost:3030/api/v1/wallet/transfer \
   }' | jq '.'
 
   docker-compose exec admin pytest tests/test_accounting.py
+
+
+  docker exec auth python -c "from db.connection import get_sessionfrom db.models import User, Account, EmailVerifysession = get_session()try:    user = session.query(User).filter(User.email == 'okusarobert@gmail.com').first()    if user:        user_id = user.id        print('Found user: ID={}, Email={}, Name={} {}'.format(user_id, user.email, user.first_name, user.last_name))                # Delete accounts        accounts = session.query(Account).filter(Account.user_id == user_id).all()        for account in accounts:            session.delete(account)        print('Deleted {} accounts'.format(len(accounts)))                # Delete email verification records        email_verifies = session.query(EmailVerify).filter(EmailVerify.user_id == user_id).all()        for ev in email_verifies:            session.delete(ev)        print('Deleted {} email verification records'.format(len(email_verifies)))                # Delete user        session.delete(user)        print('Deleted user record')                session.commit()        print('✅ User and all related data deleted successfully')    else:        print('❌ User not found')        except Exception as e:    print('❌ Error: {}'.format(e))    session.rollback()finally:    session.close()"
+
+  docker compose exec db psql -U tondeka -d tondeka -c "SELECT id, user_id, currency, account_type, balance FROM accounts WHERE user_id = 50;"
+
+  21:46 - trx-monitor

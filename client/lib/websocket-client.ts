@@ -3,7 +3,8 @@ import { io, Socket } from "socket.io-client";
 export interface CryptoPrice {
   symbol: string;
   name: string;
-  price: number;
+  price: number; // Price in UGX
+  priceUsd: number; // Original USD price
   change24h: number;
   changePercent24h: number;
   volume24h: number;
@@ -26,6 +27,7 @@ class WebSocketClient {
   private reconnectDelay = 1000;
   private priceCallbacks: ((prices: CryptoPrice[]) => void)[] = [];
   private connectionCallbacks: ((connected: boolean) => void)[] = [];
+  private usdToUgxRate = 3700; // Default rate, will be updated
 
   connect() {
     try {
@@ -33,10 +35,15 @@ class WebSocketClient {
         process.env.NEXT_PUBLIC_WEBSOCKET_URL || "ws://localhost:5000";
       this.socket = io(wsUrl, {
         transports: ["websocket"],
-        timeout: 20000,
+        timeout: 60000,
         reconnection: true,
         reconnectionAttempts: this.maxReconnectAttempts,
         reconnectionDelay: this.reconnectDelay,
+        forceNew: true,
+        upgrade: true,
+        rememberUpgrade: false,
+        pingTimeout: 60000,
+        pingInterval: 25000,
       });
 
       this.setupEventHandlers();
@@ -72,8 +79,22 @@ class WebSocketClient {
       this.handlePriceUpdate(data);
     });
 
-    this.socket.on("crypto-prices", (data: CryptoPrice[]) => {
-      this.notifyPriceCallbacks(data);
+    this.socket.on("crypto-prices", (data: any[]) => {
+      // Debug logging to check what we're receiving
+      console.log("Raw crypto prices from backend:", data.slice(0, 2)); // Log first 2 items
+      console.log("Current USD to UGX rate:", this.usdToUgxRate);
+      
+      // Backend sends USD prices, convert to UGX for display
+      const convertedPrices: CryptoPrice[] = data.map((crypto) => ({
+        ...crypto,
+        priceUsd: crypto.price, // Store original USD price
+        price: crypto.price * this.usdToUgxRate, // Convert to UGX
+        change24h: crypto.change24h * this.usdToUgxRate, // Convert absolute change to UGX
+        // changePercent24h stays as-is since it's already a percentage
+      }));
+      
+      console.log("Converted prices:", convertedPrices.slice(0, 2)); // Log first 2 converted items
+      this.notifyPriceCallbacks(convertedPrices);
     });
 
     this.socket.on("reconnect", (attemptNumber) => {
@@ -92,12 +113,13 @@ class WebSocketClient {
   }
 
   private handlePriceUpdate(updates: PriceUpdate[]) {
-    // Convert updates to full crypto price objects
+    // Convert updates to full crypto price objects with UGX conversion
     const prices: CryptoPrice[] = updates.map((update) => ({
       symbol: update.symbol,
       name: this.getCryptoName(update.symbol),
-      price: update.price,
-      change24h: update.change24h,
+      priceUsd: update.price,
+      price: update.price * this.usdToUgxRate, // Convert USD to UGX
+      change24h: update.change24h * this.usdToUgxRate,
       changePercent24h: update.changePercent24h,
       volume24h: 0, // Will be updated from full price data
       marketCap: 0, // Will be updated from full price data
@@ -172,6 +194,16 @@ class WebSocketClient {
 
   isConnected(): boolean {
     return this.socket?.connected || false;
+  }
+
+  // Update USD to UGX exchange rate
+  updateExchangeRate(rate: number) {
+    this.usdToUgxRate = rate;
+  }
+
+  // Get current exchange rate
+  getExchangeRate(): number {
+    return this.usdToUgxRate;
   }
 }
 

@@ -21,6 +21,7 @@ from lib.relworx_client import RelworxApiClient
 from shared.kafka_producer import get_kafka_producer
 from shared.currency_precision import AmountConverter
 from shared.trading_accounting import TradingAccountingService
+from shared.fiat.forex_service import forex_service
 from db.accounting import JournalEntry, LedgerTransaction, AccountingAccount
 import json
 
@@ -33,21 +34,32 @@ class TradingService:
         self.session = session
         if session:
             self.accounting_service = TradingAccountingService(session)
+    
+    def get_exchange_rate(self, from_currency: str, to_currency: str) -> float:
+        """Get exchange rate between two currencies"""
+        return forex_service.get_exchange_rate(from_currency, to_currency)
         
     def get_crypto_price(self, crypto_currency: str, fiat_currency: str = "USD") -> float:
-        """Get current crypto price"""
+        """Get current crypto price with proper fiat conversion"""
         try:
             prices = get_cached_prices()
-            price_key = f"{crypto_currency.upper()}_{fiat_currency.upper()}"
-            if price_key in prices:
-                return float(prices[price_key])
             
-            # Fallback to USD price and convert
-            usd_price_key = f"{crypto_currency.upper()}_USD"
-            if usd_price_key in prices:
-                usd_price = float(prices[usd_price_key])
-                # TODO: Add currency conversion logic
-                return usd_price
+            # The cache stores prices with just the symbol key (e.g., "BTC")
+            # All cached prices are in USD by default
+            crypto_symbol = crypto_currency.upper()
+            
+            if crypto_symbol in prices and prices[crypto_symbol] is not None:
+                usd_price = float(prices[crypto_symbol])
+                
+                if fiat_currency.upper() == "USD":
+                    return usd_price
+                
+                # Convert USD price to target fiat currency
+                exchange_rate = forex_service.get_exchange_rate("USD", fiat_currency)
+                converted_price = usd_price * exchange_rate
+                
+                logger.debug(f"Converted {crypto_currency} price: ${usd_price} USD -> {converted_price} {fiat_currency} (rate: {exchange_rate})")
+                return converted_price
                 
             raise ValueError(f"Price not found for {crypto_currency}")
         except Exception as e:
@@ -118,26 +130,42 @@ class TradingService:
     ) -> Trade:
         """Create a new trade"""
         
-        # Get user account
+        # Get or create user account for the crypto currency
         account = session.query(Account).filter(
             Account.user_id == user_id,
             Account.currency == crypto_currency
         ).first()
         
         if not account:
-            raise ValueError(f"Account not found for {crypto_currency}")
+            # Auto-create crypto account for the user
+            from service import generate_random_digits
+            from db.wallet import AccountType
+            
+            account_number = f"{generate_random_digits(10)}"
+            account = Account(
+                user_id=user_id,
+                currency=crypto_currency,
+                account_type=AccountType.CRYPTO,
+                balance=0.0,
+                locked_amount=0.0,
+                account_number=account_number,
+                label=f"{crypto_currency} Account"
+            )
+            session.add(account)
+            session.flush()  # Get the account ID without committing
+            logger.info(f"Auto-created {crypto_currency} account for user {user_id}")
         
         # Calculate amounts
         amounts = self.calculate_trade_amounts(
             crypto_currency, fiat_currency, amount, trade_type, payment_method
         )
         
-        # Create trade with unified precision fields
+        # Create trade with unified precision system
         trade = Trade(
             user_id=user_id,
             account_id=account.id,
-            trade_type=trade_type,
-            status=TradeStatus.PENDING,
+            trade_type=trade_type,  # Store enum object, not .value
+            status=TradeStatus.PENDING,  # Store enum object, not .value
             crypto_currency=crypto_currency.upper(),
             crypto_amount=amounts["crypto_amount"],
             crypto_amount_smallest_unit=amounts["crypto_amount_smallest_unit"],
@@ -148,23 +176,43 @@ class TradingService:
             fee_amount=amounts["fee_amount"],
             fee_amount_smallest_unit=amounts["fee_amount_smallest_unit"],
             fee_currency=fiat_currency.upper(),
-            payment_method=payment_method,
-            description=f"{trade_type.value.title()} {AmountConverter.format_display_amount(amounts['crypto_amount_smallest_unit'], crypto_currency)} with {payment_method.value}",
+            payment_method=payment_method,  # Store enum object, not .value
+            precision_config={
+                "crypto_currency": crypto_currency,
+                "fiat_currency": fiat_currency,
+                "fee_currency": fiat_currency
+            },
+            description=f"{trade_type.value.title()} {amounts['crypto_amount']} {crypto_currency} with {payment_method.value}",
             trade_metadata=payment_details
         )
         
-        # Set payment-specific details
+        # Set payment-specific details (only for fields that exist in database)
         if payment_method == PaymentMethod.VOUCHER:
             trade.voucher_id = payment_details.get("voucher_id")
         elif payment_method == PaymentMethod.MOBILE_MONEY:
-            trade.phone_number = payment_details.get("phone_number")
-            trade.mobile_money_provider = payment_details.get("provider")
             trade.payment_provider = PaymentProvider.RELWORX
+            # Store mobile money details in both metadata and dedicated fields
+            trade.mobile_money_provider = payment_details.get("provider")
+            if not trade.trade_metadata:
+                trade.trade_metadata = {}
+            trade.trade_metadata.update({
+                "phone_number": payment_details.get("phone_number"),
+                "provider": payment_details.get("provider")
+            })
         elif payment_method == PaymentMethod.BANK_DEPOSIT:
+            # Store bank details in both metadata and dedicated fields
             trade.bank_name = payment_details.get("bank_name")
             trade.account_name = payment_details.get("account_name")
             trade.account_number = payment_details.get("account_number")
-            trade.payment_provider = PaymentProvider.BANK_DEPOSIT
+            trade.deposit_reference = payment_details.get("deposit_reference")
+            if not trade.trade_metadata:
+                trade.trade_metadata = {}
+            trade.trade_metadata.update({
+                "bank_name": payment_details.get("bank_name"),
+                "account_name": payment_details.get("account_name"),
+                "account_number": payment_details.get("account_number"),
+                "deposit_reference": payment_details.get("deposit_reference")
+            })
         
         session.add(trade)
         session.commit()
@@ -516,8 +564,8 @@ class TradingService:
             logger.error(f"Error processing bank deposit payment: {e}")
             return False
     
-    def complete_trade(self, trade: Trade, session: Session) -> bool:
-        """Complete a trade by transferring assets"""
+    def execute_trade(self, trade: Trade, session: Session) -> bool:
+        """Execute a trade by transferring assets (renamed to avoid duplication)"""
         try:
             # Create transactions
             if trade.trade_type == TradeType.BUY:
@@ -555,7 +603,7 @@ class TradingService:
             user_crypto_account = session.query(Account).filter(
                 Account.user_id == trade.user_id,
                 Account.currency == trade.crypto_currency,
-                Account.account_type == "CRYPTO"
+                Account.account_type == AccountType.CRYPTO
             ).first()
             
             if not user_crypto_account:
@@ -564,7 +612,7 @@ class TradingService:
             # Get reserve account
             reserve_account = session.query(Account).filter(
                 Account.currency == trade.crypto_currency,
-                Account.account_type == "CRYPTO",
+                Account.account_type == AccountType.CRYPTO,
                 Account.label == "reserve"
             ).first()
             
@@ -574,7 +622,7 @@ class TradingService:
             # Get or create fee collection account
             fee_account = session.query(Account).filter(
                 Account.currency == trade.fee_currency,
-                Account.account_type == "FIAT",
+                Account.account_type == AccountType.FIAT,
                 Account.label == "fee_collection"
             ).first()
             
@@ -586,7 +634,7 @@ class TradingService:
                     balance=0,
                     locked_amount=0,
                     currency=trade.fee_currency,
-                    account_type="FIAT",
+                    account_type=AccountType.FIAT,
                     account_number=generate_unique_account_number(session, length=10),
                     label="fee_collection"
                 )
@@ -631,14 +679,16 @@ class TradingService:
             session.add(fiat_transaction)
             session.add(fee_transaction)
             
-            # Update balances
+            # Update balances using unified precision system
+            user_crypto_account.balance = float(user_crypto_account.balance or 0) + trade.crypto_amount
             user_crypto_account.crypto_balance_smallest_unit = (
                 user_crypto_account.crypto_balance_smallest_unit or 0
-            ) + int(trade.crypto_amount * (10 ** 8))  # Assuming 8 decimals
+            ) + trade.crypto_amount_smallest_unit
             
+            reserve_account.balance = float(reserve_account.balance or 0) - trade.crypto_amount
             reserve_account.crypto_balance_smallest_unit = (
                 reserve_account.crypto_balance_smallest_unit or 0
-            ) - int(trade.crypto_amount * (10 ** 8))
+            ) - trade.crypto_amount_smallest_unit
             
             # Update fee collection account
             fee_account.balance = (fee_account.balance or 0) + trade.fee_amount
@@ -663,7 +713,7 @@ class TradingService:
             user_crypto_account = session.query(Account).filter(
                 Account.user_id == trade.user_id,
                 Account.currency == trade.crypto_currency,
-                Account.account_type == "CRYPTO"
+                Account.account_type == AccountType.CRYPTO
             ).first()
             
             if not user_crypto_account:
@@ -672,13 +722,13 @@ class TradingService:
             # Get reserve accounts
             crypto_reserve = session.query(Account).filter(
                 Account.currency == trade.crypto_currency,
-                Account.account_type == "CRYPTO",
+                Account.account_type == AccountType.CRYPTO,
                 Account.label == "reserve"
             ).first()
             
             fiat_reserve = session.query(Account).filter(
                 Account.currency == trade.fiat_currency,
-                Account.account_type == "FIAT",
+                Account.account_type == AccountType.FIAT,
                 Account.label == "reserve"
             ).first()
             
@@ -688,7 +738,7 @@ class TradingService:
             # Get or create fee collection account
             fee_account = session.query(Account).filter(
                 Account.currency == trade.fee_currency,
-                Account.account_type == "FIAT",
+                Account.account_type == AccountType.FIAT,
                 Account.label == "fee_collection"
             ).first()
             
@@ -700,7 +750,7 @@ class TradingService:
                     balance=0,
                     locked_amount=0,
                     currency=trade.fee_currency,
-                    account_type="FIAT",
+                    account_type=AccountType.FIAT,
                     account_number=generate_unique_account_number(session, length=10),
                     label="fee_collection"
                 )
@@ -718,11 +768,35 @@ class TradingService:
                 trade_id=trade.id
             )
             
+            # Get user's fiat account for the payout
+            user_fiat_account = session.query(Account).filter(
+                Account.user_id == trade.user_id,
+                Account.currency == trade.fiat_currency,
+                Account.account_type == AccountType.FIAT
+            ).first()
+            
+            if not user_fiat_account:
+                # Auto-create fiat account if it doesn't exist
+                from service import generate_random_digits
+                account_number = f"{generate_random_digits(10)}"
+                user_fiat_account = Account(
+                    user_id=trade.user_id,
+                    currency=trade.fiat_currency,
+                    account_type=AccountType.FIAT,
+                    balance=0.0,
+                    locked_amount=0.0,
+                    account_number=account_number,
+                    label=f"{trade.fiat_currency} Account"
+                )
+                session.add(user_fiat_account)
+                session.flush()
+            
             # Create fiat transaction (reserve to user - net amount after fee)
             fiat_transaction = Transaction(
-                account_id=user_crypto_account.id,
+                account_id=user_fiat_account.id,  # Correct: fiat goes to user's fiat account
                 reference_id=f"SELL_FIAT_{trade.id}",
                 amount=trade.fiat_amount - trade.fee_amount,  # Net amount after fee
+                amount_smallest_unit=trade.fiat_amount_smallest_unit - trade.fee_amount_smallest_unit,
                 type=TransactionType.SELL_CRYPTO,
                 status=TransactionStatus.COMPLETED,
                 description=f"Payment for {trade.crypto_currency}",
@@ -745,19 +819,28 @@ class TradingService:
             session.add(fiat_transaction)
             session.add(fee_transaction)
             
-            # Update balances
+            # Update balances using unified precision system
+            # Debit user's crypto
+            user_crypto_account.balance = float(user_crypto_account.balance or 0) - trade.crypto_amount
             user_crypto_account.crypto_balance_smallest_unit = (
                 user_crypto_account.crypto_balance_smallest_unit or 0
-            ) - int(trade.crypto_amount * (10 ** 8))
+            ) - trade.crypto_amount_smallest_unit
             
+            # Credit crypto reserve
+            crypto_reserve.balance = float(crypto_reserve.balance or 0) + trade.crypto_amount
             crypto_reserve.crypto_balance_smallest_unit = (
                 crypto_reserve.crypto_balance_smallest_unit or 0
-            ) + int(trade.crypto_amount * (10 ** 8))
+            ) + trade.crypto_amount_smallest_unit
             
             # Update fiat balances (net amount after fee)
             net_fiat_amount = trade.fiat_amount - trade.fee_amount
+            net_fiat_smallest = trade.fiat_amount_smallest_unit - trade.fee_amount_smallest_unit
+            
+            # Debit fiat reserve
             fiat_reserve.balance = (fiat_reserve.balance or 0) - trade.fiat_amount
-            user_crypto_account.balance = (user_crypto_account.balance or 0) + net_fiat_amount
+            
+            # Credit user's fiat account (net amount)
+            user_fiat_account.balance = (user_fiat_account.balance or 0) + net_fiat_amount
             
             # Update fee collection account
             fee_account.balance = (fee_account.balance or 0) + trade.fee_amount
@@ -781,8 +864,8 @@ class TradingService:
             message = {
                 "trade_id": trade.id,
                 "user_id": trade.user_id,
-                "trade_type": trade.trade_type.value,
-                "payment_method": trade.payment_method.value,
+                "trade_type": trade.trade_type,  # Already a string value
+                "payment_method": trade.payment_method,  # Already a string value
                 "amount": float(trade.fiat_amount),
                 "currency": trade.fiat_currency
             }
@@ -798,7 +881,7 @@ class TradingService:
             message = {
                 "trade_id": trade.id,
                 "user_id": trade.user_id,
-                "trade_type": trade.trade_type.value,
+                "trade_type": trade.trade_type,  # Already a string value
                 "crypto_amount": float(trade.crypto_amount),
                 "crypto_currency": trade.crypto_currency,
                 "fiat_amount": float(trade.fiat_amount),

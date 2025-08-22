@@ -15,7 +15,14 @@ db_url = "postgresql://{user}:{password}@{host}:{port}/{db_name}".format(
 
 print("db_url: ",db_url)
 
-engine = create_engine(db_url, pool_pre_ping=True)
+engine = create_engine(
+    db_url, 
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+    pool_recycle=3600
+)
 
 session = scoped_session(
     sessionmaker(

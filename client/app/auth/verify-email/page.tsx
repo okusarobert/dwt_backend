@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
@@ -13,28 +13,43 @@ import {
   Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { toast } from "react-hot-toast";
 import { AuthMiddleware } from "@/components/auth/auth-middleware";
 import Header from "@/components/layout/header";
 import Footer from "@/components/layout/footer";
+import { apiClient } from "@/lib/api-client";
 
 function VerifyEmailContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [otp, setOtp] = useState(["", "", "", "", "", ""]);
+  const [otp, setOtp] = useState("");
   const [loading, setLoading] = useState(false);
   const [resendLoading, setResendLoading] = useState(false);
   const [countdown, setCountdown] = useState(0);
   const [email, setEmail] = useState("");
-  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   useEffect(() => {
-    // Get email from URL params or localStorage
-    const emailParam = searchParams.get("email");
-    const storedEmail = localStorage.getItem("signup_email");
-    setEmail(emailParam || storedEmail || "");
+    const loadUserEmail = async () => {
+      // Get email from URL params or localStorage first
+      const emailParam = searchParams.get("email");
+      const storedEmail = localStorage.getItem("signup_email");
+      
+      if (emailParam || storedEmail) {
+        setEmail(emailParam || storedEmail || "");
+      } else {
+        // If no email in params/storage, fetch from backend for authenticated users
+        try {
+          const response = await apiClient.getVerificationInfo();
+          setEmail(response.email || "");
+        } catch (error) {
+          console.log("Could not fetch user email:", error);
+          // User might not be authenticated, that's okay
+        }
+      }
+    };
 
-    // Start countdown for resend
+    loadUserEmail();
     setCountdown(30);
   }, [searchParams]);
 
@@ -45,69 +60,25 @@ function VerifyEmailContent() {
     }
   }, [countdown]);
 
-  const handleOtpChange = (index: number, value: string) => {
-    if (value.length > 1) return; // Only allow single digit
-
-    const newOtp = [...otp];
-    newOtp[index] = value;
-    setOtp(newOtp);
-
-    // Auto-focus next input
-    if (value && index < 5) {
-      inputRefs.current[index + 1]?.focus();
-    }
-  };
-
-  const handleKeyDown = (
-    index: number,
-    e: React.KeyboardEvent<HTMLInputElement>
-  ) => {
-    if (e.key === "Backspace" && !otp[index] && index > 0) {
-      // Move to previous input on backspace if current is empty
-      inputRefs.current[index - 1]?.focus();
-    }
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-
-    const otpString = otp.join("");
-    if (otpString.length !== 6) {
-      toast.error("Please enter the complete 6-digit code");
+    if (otp.length !== 6) {
+      toast.error("Please enter all 6 digits");
       return;
     }
 
     setLoading(true);
     try {
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/auth/verify-email`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            otp: otpString,
-            email: email,
-          }),
-        }
-      );
-
-      if (response.ok) {
-        toast.success("Email verified successfully!");
-        setTimeout(() => {
-          router.push("/auth/signin");
-        }, 2000);
-      } else {
-        const errorData = await response.json();
-        toast.error(errorData.message || "Invalid verification code");
-        // Clear OTP on error
-        setOtp(["", "", "", "", "", ""]);
-        inputRefs.current[0]?.focus();
-      }
-    } catch (err) {
-      toast.error("An unexpected error occurred");
-      setOtp(["", "", "", "", "", ""]);
+      const data = await apiClient.verifyEmail(otp, email);
+      toast.success("Email verified successfully!");
+      localStorage.removeItem("signup_email");
+      // User is already authenticated, redirect to dashboard
+      router.push("/dashboard");
+    } catch (error: any) {
+      console.error("Verification error:", error);
+      const message = error.response?.data?.message || "Invalid verification code";
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -118,26 +89,13 @@ function VerifyEmailContent() {
 
     setResendLoading(true);
     try {
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/auth/resend-verification`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ email }),
-        }
-      );
-
-      if (response.ok) {
-        toast.success("Verification code sent successfully!");
-        setCountdown(30);
-      } else {
-        const errorData = await response.json();
-        toast.error(errorData.message || "Failed to resend code");
-      }
-    } catch (err) {
-      toast.error("Failed to resend verification code");
+      await apiClient.resendVerification(email);
+      toast.success("Verification code sent successfully!");
+      setCountdown(30);
+    } catch (error: any) {
+      console.error("Resend error:", error);
+      const message = error.response?.data?.message || "Failed to resend code";
+      toast.error(message);
     } finally {
       setResendLoading(false);
     }
@@ -172,37 +130,36 @@ function VerifyEmailContent() {
 
           <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 p-8">
             <form onSubmit={handleSubmit} className="space-y-6">
-              {/* OTP Input Fields */}
+              {/* OTP Input */}
               <div className="space-y-4">
-                <label className="block text-sm font-semibold text-gray-700 dark:text-gray-300 text-center">
-                  Enter the 6-digit code
-                </label>
-
-                <div className="flex justify-center space-x-3">
-                  {otp.map((digit, index) => (
-                    <input
-                      key={index}
-                      ref={(el) => {
-                        inputRefs.current[index] = el;
-                      }}
-                      type="text"
-                      inputMode="numeric"
-                      pattern="[0-9]*"
-                      maxLength={1}
-                      value={digit}
-                      onChange={(e) => handleOtpChange(index, e.target.value)}
-                      onKeyDown={(e) => handleKeyDown(index, e)}
-                      className="w-14 h-14 text-center text-2xl font-bold border-2 border-gray-300 dark:border-gray-600 rounded-xl focus:border-blue-500 focus:ring-4 focus:ring-blue-100 dark:focus:ring-blue-900/20 transition-all duration-200 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                      placeholder="0"
-                    />
-                  ))}
+                <div className="text-center text-gray-600 dark:text-gray-400 text-sm">
+                  Enter the 6-digit code sent to{" "}
+                  <span className="font-medium text-gray-900 dark:text-white">
+                    {email}
+                  </span>
+                </div>
+                <div className="flex justify-center">
+                  <InputOTP
+                    maxLength={6}
+                    value={otp}
+                    onChange={(value) => setOtp(value)}
+                  >
+                    <InputOTPGroup>
+                      <InputOTPSlot index={0} />
+                      <InputOTPSlot index={1} />
+                      <InputOTPSlot index={2} />
+                      <InputOTPSlot index={3} />
+                      <InputOTPSlot index={4} />
+                      <InputOTPSlot index={5} />
+                    </InputOTPGroup>
+                  </InputOTP>
                 </div>
               </div>
 
               {/* Submit Button */}
               <Button
                 type="submit"
-                disabled={loading || otp.join("").length !== 6}
+                disabled={loading || otp.length !== 6}
                 className="w-full bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white py-4 px-6 rounded-xl font-semibold text-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
               >
                 {loading ? (

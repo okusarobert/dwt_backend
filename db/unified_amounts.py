@@ -94,7 +94,11 @@ class UnifiedBalanceMixin:
         """Get the display balance"""
         if not self.balance_smallest_unit or not self.currency:
             return Decimal('0')
-        return AmountConverter.from_smallest_units(int(self.balance_smallest_unit), self.currency)
+        # Handle case where balance_smallest_unit might be an InstrumentedAttribute
+        balance_value = getattr(self, 'balance_smallest_unit', 0)
+        if balance_value is None:
+            balance_value = 0
+        return AmountConverter.from_smallest_units(int(balance_value), self.currency)
     
     @balance.setter
     def balance(self, value: Decimal):

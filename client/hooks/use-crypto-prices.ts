@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { websocketClient, CryptoPrice } from "@/lib/websocket-client";
+import { apiClient } from "@/lib/api-client";
 
 export function useCryptoPrices() {
   const [prices, setPrices] = useState<CryptoPrice[]>([]);
@@ -9,8 +10,14 @@ export function useCryptoPrices() {
 
   // Connect to WebSocket and subscribe to price updates
   useEffect(() => {
-    const connect = () => {
+    let cleanup: (() => void) | undefined;
+    
+    const connect = async () => {
       try {
+        // Get and set USD to UGX exchange rate
+        const exchangeRate = await apiClient.getUsdToUgxRate();
+        websocketClient.updateExchangeRate(exchangeRate);
+        
         websocketClient.connect();
 
         // Subscribe to price updates
@@ -32,8 +39,8 @@ export function useCryptoPrices() {
           }
         );
 
-        // Cleanup function
-        return () => {
+        // Set cleanup function
+        cleanup = () => {
           unsubscribePrices();
           unsubscribeConnection();
           websocketClient.disconnect();
@@ -45,27 +52,22 @@ export function useCryptoPrices() {
       }
     };
 
-    const cleanup = connect();
-    return cleanup;
+    connect();
+    
+    return () => {
+      if (cleanup) cleanup();
+    };
   }, []);
 
   // Helper functions for price formatting
   const formatPrice = useCallback((price: number): string => {
-    if (price >= 1) {
-      return new Intl.NumberFormat("en-US", {
-        style: "currency",
-        currency: "USD",
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      }).format(price);
-    } else {
-      return new Intl.NumberFormat("en-US", {
-        style: "currency",
-        currency: "USD",
-        minimumFractionDigits: 6,
-        maximumFractionDigits: 6,
-      }).format(price);
-    }
+    // Format as UGX currency
+    return new Intl.NumberFormat("en-UG", {
+      style: "currency",
+      currency: "UGX",
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    }).format(price);
   }, []);
 
   const formatChange = useCallback((change: number): string => {
@@ -126,7 +128,9 @@ export function useCryptoPrices() {
   // Manual refresh function
   const refresh = useCallback(() => {
     if (websocketClient.isConnected()) {
-      websocketClient.socket?.emit("subscribe", { channel: "crypto-prices" });
+      // Reconnect to refresh prices
+      websocketClient.disconnect();
+      setTimeout(() => websocketClient.connect(), 1000);
     }
   }, []);
 

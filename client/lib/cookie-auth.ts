@@ -24,7 +24,9 @@ class CookieAuth {
         }
       );
 
-      return response.ok;
+      // Consider 403 (email verification required) as authenticated
+      // The user has a valid token but needs email verification
+      return response.ok || response.status === 403;
     } catch (error) {
       console.error("Auth check failed:", error);
       return false;
