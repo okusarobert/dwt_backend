@@ -1,8 +1,0 @@
-{
-  "/auth/verify-email/page": "app/auth/verify-email/page.js",
-  "/auth/signup/page": "app/auth/signup/page.js",
-  "/auth/signin/page": "app/auth/signin/page.js",
-  "/dashboard/transactions/page": "app/dashboard/transactions/page.js",
-  "/dashboard/wallet/page": "app/dashboard/wallet/page.js",
-  "/dashboard/transactions/[id]/page": "app/dashboard/transactions/[id]/page.js"
-}
