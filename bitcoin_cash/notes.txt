@@ -1,0 +1,261 @@
+Bitcoin Cash Integration Notes
+=============================
+
+Bitcoin Cash (BCH) integration for DWT backend using self-hosted node.
+
+## Bitcoin Cash Overview
+
+**Key Differences from Bitcoin:**
+- **Larger Block Size**: 32MB blocks vs Bitcoin's 1MB
+- **Faster Transactions**: More throughput, similar confirmation times
+- **Lower Fees**: Typically 0.001-0.01 BCH per transaction
+- **Same UTXO Model**: Identical transaction structure to Bitcoin
+- **Different Address Format**: CashAddr format (bitcoincash:qp...) vs Legacy
+- **No SegWit**: Uses original Bitcoin transaction format
+- **Different Chain**: Forked from Bitcoin at block 478,558 (Aug 1, 2017)
+
+**Technical Specifications:**
+- **Block Time**: ~10 minutes (same as Bitcoin)
+- **Difficulty Adjustment**: Every block (vs Bitcoin's 2016 blocks)
+- **Hash Algorithm**: SHA-256 (same as Bitcoin)
+- **Port**: 8333 (mainnet), 18333 (testnet) - same as Bitcoin
+- **RPC Port**: 8332 (mainnet), 18332 (testnet) - same as Bitcoin
+
+## Integration Approach
+
+**Self-Hosted Bitcoin Cash Node** (following Bitcoin/Litecoin pattern):
+- **Bitcoin Cash Node (BCHN)**: Most popular implementation
+- **Bitcoin Unlimited**: Alternative implementation
+- **Bitcoin ABC**: Original implementation (less popular now)
+
+## Node Setup Requirements
+
+**VPS Requirements:**
+- Ubuntu 20.04+ LTS
+- 4GB+ RAM (8GB recommended)
+- 200GB+ storage (blockchain size ~180GB and growing)
+- Stable internet connection
+
+**Storage Comparison:**
+- **Bitcoin**: ~500GB
+- **Bitcoin Cash**: ~180GB (smaller due to later start)
+- **Litecoin**: ~50GB
+- **XRP**: ~25GB
+
+## Bitcoin Cash Node Installation
+
+**Option 1: Bitcoin Cash Node (BCHN) - Recommended**
+```bash
+# Download latest release
+wget https://github.com/bitcoin-cash-node/bitcoin-cash-node/releases/download/v26.1.0/bitcoin-cash-node-26.1.0-x86_64-linux-gnu.tar.gz
+
+# Extract and install
+tar -xzf bitcoin-cash-node-26.1.0-x86_64-linux-gnu.tar.gz
+sudo cp bitcoin-cash-node-26.1.0/bin/* /usr/local/bin/
+
+# Create user and directories
+sudo useradd -r -s /bin/false bitcoincash
+sudo mkdir -p /var/lib/bitcoincash
+sudo chown bitcoincash:bitcoincash /var/lib/bitcoincash
+```
+
+**Option 2: Bitcoin Unlimited**
+```bash
+# Download Bitcoin Unlimited
+wget https://github.com/BitcoinUnlimited/BitcoinUnlimited/releases/download/bucash1.9.0.0/BUcash-1.9.0.0-linux64.tar.gz
+```
+
+## Configuration
+
+**bitcoin.conf for Bitcoin Cash:**
+```ini
+# Network
+testnet=1
+listen=1
+discover=1
+
+# RPC Configuration
+server=1
+rpcuser=tondeka
+rpcpassword=YOUR_STRONG_PASSWORD_HERE
+rpcallowip=0.0.0.0/0
+rpcbind=0.0.0.0:18332
+
+# Connection limits
+maxconnections=50
+
+# Pruning (optional)
+prune=5000
+
+# ZMQ (for real-time notifications)
+zmqpubrawblock=tcp://0.0.0.0:29332
+zmqpubrawtx=tcp://0.0.0.0:29333
+zmqpubhashtx=tcp://0.0.0.0:29334
+zmqpubhashblock=tcp://0.0.0.0:29335
+
+# Logging
+debug=rpc
+debug=net
+
+# Performance
+dbcache=1000
+maxmempool=500
+```
+
+## Address Format Differences
+
+**Bitcoin Cash Address Formats:**
+1. **CashAddr** (New): `bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a`
+2. **Legacy** (Old): `1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2` (same as Bitcoin)
+
+**Address Conversion:**
+- Bitcoin Cash uses CashAddr by default
+- Legacy addresses still work but deprecated
+- Need conversion utilities for compatibility
+
+## Systemd Service
+
+**Create service file:**
+```ini
+[Unit]
+Description=Bitcoin Cash daemon
+After=network.target
+
+[Service]
+Type=forking
+User=bitcoincash
+Group=bitcoincash
+ExecStart=/usr/local/bin/bitcoind -daemon -conf=/etc/bitcoincash/bitcoin.conf -datadir=/var/lib/bitcoincash
+ExecStop=/usr/local/bin/bitcoin-cli -conf=/etc/bitcoincash/bitcoin.conf stop
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Firewall Configuration
+
+```bash
+# P2P port (testnet)
+sudo ufw allow 18333
+
+# RPC port (restrict to your IPs)
+sudo ufw allow from YOUR_IP to any port 18332
+
+# ZMQ ports
+sudo ufw allow from YOUR_IP to any port 29332:29335
+```
+
+## Python Client Integration
+
+**Similarities to Bitcoin:**
+- Same RPC interface
+- Same transaction structure
+- Same UTXO model
+- Same HD wallet derivation
+
+**Differences to Handle:**
+- CashAddr address format
+- Different network magic bytes
+- Different genesis block
+
+## Client Implementation Strategy
+
+**Reuse Bitcoin Client Pattern:**
+```python
+# Can extend existing BTC client
+class BCHClient(BTCClient):
+    def __init__(self, rpc_url, network='testnet'):
+        super().__init__(rpc_url, network)
+        self.address_format = 'cashaddr'  # vs 'bech32' for Bitcoin
+        
+    def format_address(self, address):
+        # Convert to CashAddr format
+        return convert_to_cashaddr(address)
+```
+
+## Environment Variables
+
+```bash
+# Bitcoin Cash Configuration
+BCH_TESTNET_RPC_URL=http://YOUR_VPS_IP:18332
+BCH_TESTNET_RPC_USER=tondeka
+BCH_TESTNET_RPC_PASSWORD=YOUR_PASSWORD
+BCH_MAINNET_RPC_URL=http://YOUR_VPS_IP:8332
+BCH_MAINNET_RPC_USER=tondeka
+BCH_MAINNET_RPC_PASSWORD=YOUR_PASSWORD
+```
+
+## Testing Strategy
+
+**Testnet Workflow:**
+1. Set up Bitcoin Cash testnet node
+2. Generate testnet addresses (CashAddr format)
+3. Fund addresses using testnet faucet
+4. Test BCH transactions
+5. Implement webhook monitoring
+6. Test sweep functionality
+
+**Testnet Resources:**
+- **Faucet**: https://testnet-faucet.bitcoincash.org/
+- **Explorer**: https://www.blocktrail.com/tBCC
+- **Alternative Explorer**: https://blockchair.com/bitcoin-cash/testnet
+
+## Advantages for DWT Backend
+
+**Why Bitcoin Cash is Good Addition:**
+- **Fast Setup**: Very similar to existing Bitcoin setup
+- **Code Reuse**: Can extend Bitcoin client with minimal changes
+- **Lower Fees**: Better for frequent transactions
+- **Larger Blocks**: Higher throughput than Bitcoin
+- **Established Network**: Mature blockchain with good liquidity
+
+## Storage and Sync Comparison
+
+| Chain | Storage | Sync Time | Complexity |
+|-------|---------|-----------|------------|
+| **Bitcoin** | 500GB+ | 1-7 days | High |
+| **Bitcoin Cash** | 180GB+ | 6-24 hours | Low (Bitcoin fork) |
+| **Litecoin** | 50GB+ | 2-12 hours | Low |
+| **XRP** | 25GB+ | 2-6 hours | Medium |
+
+## Implementation Plan
+
+**Phase 1: Node Setup**
+1. Deploy Bitcoin Cash node on new VPS or existing one
+2. Configure testnet with internet RPC access
+3. Test connectivity and sync
+
+**Phase 2: Client Development**
+4. Extend Bitcoin client for Bitcoin Cash
+5. Handle CashAddr address format
+6. Test basic operations
+
+**Phase 3: Integration**
+7. Integrate with existing wallet service
+8. Add sweep functionality
+9. Production deployment
+
+## Cost Analysis
+
+**Infrastructure:**
+- **VPS**: Same as Bitcoin (~$20-40/month)
+- **Storage**: 200GB+ required
+- **Bandwidth**: Similar to Bitcoin
+
+**Development:**
+- **Low**: Can reuse 80%+ of Bitcoin code
+- **Address Format**: Main difference to handle
+- **Testing**: Free testnet available
+
+## Next Steps
+
+1. **Choose VPS**: Use existing Bitcoin VPS or deploy new one
+2. **Install Bitcoin Cash Node**: BCHN recommended
+3. **Configure testnet**: Similar to Bitcoin configuration
+4. **Test RPC access**: Verify internet connectivity
+5. **Create BCH client**: Extend existing Bitcoin client
+6. **Integration**: Add to DWT backend
+
+**Recommendation**: Bitcoin Cash will be the easiest blockchain to add after Bitcoin, requiring minimal new code and infrastructure.

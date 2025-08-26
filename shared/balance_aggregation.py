@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Any
 from decimal import Decimal
 from shared.fiat.forex_service import forex_service
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from db.wallet import Account, AccountType
 from db.crypto_precision import CryptoPrecisionManager
 import logging
@@ -29,10 +30,14 @@ class BalanceAggregationService:
         'TRX': ['TRX'],  # Native TRX only
         'SOL': ['SOL'],  # Native SOL only
         'LTC': ['LTC'],  # Native LTC only
+        'XRP': ['XRP'],  # Native XRP only
+        'BASE': ['BASE'],  # Native BASE only
     }
     
-    # Base currencies (what we aggregate to)
-    BASE_CURRENCIES = ['BTC', 'ETH', 'BNB', 'TRX', 'SOL', 'LTC', 'USDT', 'USDC']
+    def get_base_currencies(self):
+        """Get enabled base currencies from admin panel"""
+        from shared.currency_utils import get_cached_enabled_currencies
+        return get_cached_enabled_currencies()
     
     def __init__(self, session: Session):
         self.session = session
@@ -44,16 +49,17 @@ class BalanceAggregationService:
         Returns:
             Dict with base currency as key and aggregated balance info as value
         """
-        # Get all crypto accounts for the user
+        # Get all crypto accounts for the user (excluding reserve accounts)
         crypto_accounts = self.session.query(Account).filter(
             Account.user_id == user_id,
-            Account.account_type == AccountType.CRYPTO
+            Account.account_type == AccountType.CRYPTO,
+            or_(Account.label.is_(None), ~Account.label.like('RESERVE_%'))
         ).all()
         
         aggregated_balances = {}
         
-        # Initialize all base currencies
-        for base_currency in self.BASE_CURRENCIES:
+        # Initialize all enabled base currencies
+        for base_currency in self.get_base_currencies():
             aggregated_balances[base_currency] = {
                 'total_balance': 0.0,
                 'chains': {},
@@ -68,12 +74,13 @@ class BalanceAggregationService:
             # Determine which base currency this account contributes to
             base_currency = self._determine_base_currency(currency, parent_currency)
             
-            if base_currency:
+            # Only process if base_currency is enabled
+            if base_currency and base_currency in self.get_base_currencies():
                 # Get balance in standard units
                 balance_smallest = account.crypto_balance_smallest_unit or 0
                 balance_standard = self._convert_to_standard_units(balance_smallest, currency, account)
                 
-                # Add to aggregated balance
+                # Add to aggregated balance (currency is guaranteed to exist from initialization)
                 aggregated_balances[base_currency]['total_balance'] += balance_standard
                 
                 # Track by chain
@@ -205,7 +212,7 @@ class BalanceAggregationService:
                     return base_curr
         
         # If not found in multi-chain tokens, return the currency itself if it's a base currency
-        if currency_upper in self.BASE_CURRENCIES:
+        if currency_upper in self.get_base_currencies():
             return currency_upper
         
         return None

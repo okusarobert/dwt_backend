@@ -36,6 +36,14 @@ CURRENCY_PRECISION = {
     'WORLD': PrecisionConfig('WORLD', CurrencyType.CRYPTO, 'wei', 18, 18, 10**18),
     'LTC': PrecisionConfig('LTC', CurrencyType.CRYPTO, 'litoshis', 8, 8, 100_000_000),
     'BCH': PrecisionConfig('BCH', CurrencyType.CRYPTO, 'satoshis', 8, 8, 100_000_000),
+    'XRP': PrecisionConfig('XRP', CurrencyType.CRYPTO, 'drops', 6, 6, 10**6),
+    'USDC': PrecisionConfig('USDC', CurrencyType.CRYPTO, 'units', 6, 6, 10**6),
+    'USDT': PrecisionConfig('USDT', CurrencyType.CRYPTO, 'units', 6, 6, 10**6),
+    
+    # Multi-network USDT variants
+    'USDT_ERC20': PrecisionConfig('USDT_ERC20', CurrencyType.CRYPTO, 'units', 6, 6, 10**6),
+    'USDT_BEP20': PrecisionConfig('USDT_BEP20', CurrencyType.CRYPTO, 'units', 6, 6, 10**6),
+    'USDT_TRC20': PrecisionConfig('USDT_TRC20', CurrencyType.CRYPTO, 'units', 6, 6, 10**6),
     
     # Fiat currencies
     'USD': PrecisionConfig('USD', CurrencyType.FIAT, 'cents', 2, 2, 100),
@@ -55,6 +63,9 @@ class AmountConverter:
             raise ValueError(f"Unsupported currency: {currency}")
         
         config = CURRENCY_PRECISION[currency]
+        # Ensure we're working with Decimal for precision
+        if not isinstance(amount, Decimal):
+            amount = Decimal(str(amount))
         smallest_units = int(amount * config.smallest_unit_per_base)
         return smallest_units
     

@@ -19,19 +19,13 @@ import {
 } from "@/components/ui/select";
 import { useAuth } from "@/components/auth/auth-provider";
 import { toast } from "react-hot-toast";
-import { ArrowDownUp, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import Image from "next/image";
 import { getCryptoLogo, createFallbackLogo } from "@/lib/crypto-logos";
 import { AuthenticatedLayout } from "@/components/layout/authenticated-layout";
 
 // --- MOCK DATA --- //
-const cryptocurrencies = [
-  { code: "BTC", name: "Bitcoin", symbol: "BTC" },
-  { code: "ETH", name: "Ethereum", symbol: "ETH" },
-  { code: "SOL", name: "Solana", symbol: "SOL" },
-  { code: "BNB", name: "BNB", symbol: "BNB" },
-  { code: "USDT", name: "Tether", symbol: "USDT" },
-];
+const cryptocurrencies: any[] = [];
 
 // --- CURRENCY INPUT COMPONENT (Adapted from TradingPage) --- //
 interface CurrencyInputProps {
@@ -125,8 +119,8 @@ function ConvertPage() {
   const { user, isLoading } = useAuth();
   const [spendAmount, setSpendAmount] = useState("");
   const [receiveAmount, setReceiveAmount] = useState("");
-  const [fromCurrency, setFromCurrency] = useState("BTC");
-  const [toCurrency, setToCurrency] = useState("USDT");
+  const [fromCurrency, setFromCurrency] = useState("");
+  const [toCurrency, setToCurrency] = useState("");
 
   // Mock exchange rate and balances
   const exchangeRate = useMemo(() => {

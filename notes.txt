@@ -128,3 +128,6 @@ curl -X POST http://localhost:3030/api/v1/wallet/transfer \
   docker compose exec db psql -U tondeka -d tondeka -c "SELECT id, user_id, currency, account_type, balance FROM accounts WHERE user_id = 50;"
 
   21:46 - trx-monitor
+
+
+  

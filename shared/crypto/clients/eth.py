@@ -198,6 +198,26 @@ class ETHWallet:
     def notify_existing_address(self, address: str):
         """Manually send notification for an existing address"""
         self._notify_address_created(address)
+    
+    def _register_address_for_webhook_monitoring(self, address: str, crypto_address_id: int):
+        """Register address for webhook monitoring"""
+        try:
+            # Import webhook integration
+            import sys
+            import os
+            sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'wallet'))
+            from ethereum_webhook_integration import register_eth_address_for_monitoring
+            
+            success = register_eth_address_for_monitoring(address, crypto_address_id)
+            if success:
+                self.logger.info(f"✅ Registered ETH address {address} for webhook monitoring")
+            else:
+                self.logger.warning(f"⚠️ Failed to register ETH address {address} for webhook monitoring")
+                
+        except ImportError as e:
+            self.logger.warning(f"⚠️ Webhook integration not available: {e}")
+        except Exception as e:
+            self.logger.error(f"❌ Error registering address for webhook monitoring: {e}")
 
     # ===== Alchemy API Methods =====
     

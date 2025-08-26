@@ -111,9 +111,12 @@ class ApiClient {
           // Clear auth state on 401
           await cookieAuth.removeAuthCookie();
         } else if (error.response?.status === 403 && error.response?.data?.redirect === '/auth/verify-email') {
-          // Handle email verification required
+          // Handle email verification required - but avoid redirect loop
           console.log('Email verification required, redirecting...');
-          window.location.href = '/auth/verify-email';
+          // Only redirect if we're not already on the verify-email page
+          if (typeof window !== 'undefined' && !window.location.pathname.includes('/auth/verify-email')) {
+            window.location.href = '/auth/verify-email';
+          }
           return Promise.reject(new Error('Email verification required'));
         }
         return Promise.reject(error);
@@ -204,8 +207,8 @@ class ApiClient {
 
   async getUserConfig(): Promise<User | null> {
     try {
-      const response: AxiosResponse<User> = await this.authClient.get("/user-config");
-      return response.data;
+      const response: AxiosResponse<{ user: User }> = await this.authClient.get("/user-config");
+      return response.data.user;
     } catch (error) {
       console.error("Failed to get user config:", error);
       return null;
@@ -593,20 +596,56 @@ class ApiClient {
     return response.data;
   }
 
+  // Get quote for buying specified crypto amount
+  async getQuoteForCryptoAmount(
+    cryptoCurrency: string,
+    cryptoAmount: number,
+    paymentMethod: string = 'mobile_money'
+  ): Promise<{
+    crypto_currency: string;
+    crypto_amount: number;
+    crypto_amount_smallest_unit: number;
+    fiat_currency: string;
+    gross_fiat_cost: number;
+    gross_fiat_cost_smallest_unit: number;
+    fee_amount: number;
+    fee_amount_smallest_unit: number;
+    total_fiat_cost: number;
+    total_fiat_cost_smallest_unit: number;
+    exchange_rate: number;
+    fee_percentage: number;
+    payment_method: string;
+  }> {
+    const response = await this.walletClient.post('/trading/quote', {
+      crypto_currency: cryptoCurrency,
+      fiat_currency: 'UGX',
+      crypto_amount: cryptoAmount,
+      payment_method: paymentMethod
+    });
+    return response.data.data;
+  }
+
   async executeTrade(
     tradeType: 'buy' | 'sell',
     cryptoCurrency: string,
     amount: number,
-    phoneNumber: string
+    phoneNumber: string,
+    amountType: 'fiat' | 'crypto' = 'fiat'
   ): Promise<{
     trade_id: string;
     status: string;
     payment_url?: string;
     message: string;
   }> {
-    const response = await this.walletClient.post(`/api/trading/${tradeType}`, {
+    const response = await this.walletClient.post(`/trading/${tradeType}`, {
       crypto_currency: cryptoCurrency,
+      fiat_currency: 'UGX',
       amount: amount,
+      amount_type: amountType,
+      payment_method: 'mobile_money',
+      payment_details: {
+        phone_number: phoneNumber
+      },
       phone_number: phoneNumber
     });
     return response.data;
@@ -616,14 +655,26 @@ class ApiClient {
     trades: Array<{
       id: string;
       type: 'buy' | 'sell';
+      trade_type: string;
       crypto_currency: string;
+      fiat_currency: string;
       crypto_amount: number;
       fiat_amount: number;
+      total_amount: number;
+      exchange_rate: number;
+      fee_amount: number;
       status: string;
+      payment_method: string;
       created_at: string;
+      updated_at: string;
       completed_at?: string;
     }>;
     total: number;
+    pagination: {
+      limit: number;
+      offset: number;
+      total: number;
+    };
   }> {
     const response = await this.walletClient.get('/api/trading/history', {
       params: { limit, offset }
@@ -633,8 +684,9 @@ class ApiClient {
 
   // Get trade by ID
   async getTrade(tradeId: string): Promise<{
-    id: string;
-    type: 'buy' | 'sell';
+    id: number;
+    type?: 'buy' | 'sell';
+    trade_type?: 'buy' | 'sell';
     crypto_currency: string;
     crypto_amount: number;
     fiat_amount: number;
@@ -644,7 +696,112 @@ class ApiClient {
     payment_url?: string;
     phone_number?: string;
   }> {
-    const response = await this.walletClient.get(`/api/trading/${tradeId}`);
+    const response = await this.walletClient.get(`/trading/trades/${tradeId}`);
+    return response.data;
+  }
+
+  // Multi-network deposit methods
+  async getMultiNetworkDepositNetworks(tokenSymbol: string, includeTestnets: boolean = false): Promise<{
+    success: boolean;
+    networks: Array<{
+      network_type: string;
+      network_name: string;
+      display_name: string;
+      currency_code: string;
+      confirmation_blocks: number;
+      explorer_url: string;
+      is_testnet: boolean;
+    }>;
+    error?: string;
+  }> {
+    const response = await this.walletClient.get(`/wallet/deposit/networks/${tokenSymbol}`, {
+      params: { include_testnets: includeTestnets }
+    });
+    return response.data;
+  }
+
+  async generateMultiNetworkDepositAddress(tokenSymbol: string, networkType: string): Promise<{
+    success: boolean;
+    address: string;
+    currency_code: string;
+    network: {
+      type: string;
+      name: string;
+      confirmation_blocks: number;
+      explorer_url: string;
+    };
+    token_info: {
+      symbol: string;
+      contract_address: string;
+      decimals: number;
+    };
+    error?: string;
+  }> {
+    const response = await this.walletClient.get(`/wallet/deposit/address/${tokenSymbol}/${networkType}`);
+    return response.data;
+  }
+
+  // Currency management methods
+  async getCurrencies(): Promise<{
+    success: boolean;
+    currencies: Array<{
+      id: string;
+      symbol: string;
+      name: string;
+      is_enabled: boolean;
+      is_multi_network: boolean;
+      contract_address?: string;
+      decimals: number;
+      networks: Array<{
+        network_type: string;
+        network_name: string;
+        is_enabled: boolean;
+        contract_address?: string;
+        confirmation_blocks: number;
+        explorer_url: string;
+      }>;
+      created_at: string;
+      updated_at: string;
+    }>;
+    error?: string;
+  }> {
+    const response = await this.adminClient.get('/admin/currencies');
+    return response.data;
+  }
+
+  async createCurrency(currencyData: any): Promise<{
+    success: boolean;
+    currency?: any;
+    error?: string;
+  }> {
+    const response = await this.adminClient.post('/admin/currencies', currencyData);
+    return response.data;
+  }
+
+  async updateCurrency(currencyId: string, currencyData: any): Promise<{
+    success: boolean;
+    currency?: any;
+    error?: string;
+  }> {
+    const response = await this.adminClient.put(`/admin/currencies/${currencyId}`, currencyData);
+    return response.data;
+  }
+
+  async updateCurrencyStatus(currencyId: string, isEnabled: boolean): Promise<{
+    success: boolean;
+    error?: string;
+  }> {
+    const response = await this.adminClient.patch(`/admin/currencies/${currencyId}/status`, {
+      is_enabled: isEnabled
+    });
+    return response.data;
+  }
+
+  async deleteCurrency(currencyId: string): Promise<{
+    success: boolean;
+    error?: string;
+  }> {
+    const response = await this.adminClient.delete(`/admin/currencies/${currencyId}`);
     return response.data;
   }
 }

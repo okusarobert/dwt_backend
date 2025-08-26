@@ -10,6 +10,14 @@ COPY alembic /app/alembic
 # COPY tests /app/tests
 COPY requirements.txt alembic.ini /app/
 
+# Install build dependencies for compiling Python packages
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    build-essential \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install -r /app/requirements.txt
 RUN pip install pytest pytest-flask gunicorn flasgger
 

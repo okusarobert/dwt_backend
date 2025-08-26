@@ -263,13 +263,18 @@ def logout():
 
 
 @app.route('/verify-email', methods=['POST'])
+@token_required
 def verify_email():
     data = request.get_json()
+
+    app.logger.info(f"USER: {g.user}")
     
     # Get email from cookie if not provided in request
-    email = data.get('email') or request.cookies.get('verification-email')
-    if not email:
-        return jsonify({"message": "Email not found"}), 400
+    # email = data.get('email') or request.cookies.get('verification-email')
+    # if not email:
+    #     return jsonify({"message": "Email not found"}), 400
+
+    email = g.user.email
     
     code = data.get('code')
     if not code or len(code) != 6:
@@ -465,7 +470,7 @@ def user_config():
         "first_name": g.user.first_name,
         "last_name": g.user.last_name,
         "email": g.user.email,
-        "role": g.user.role.value,
+        "role": g.user.role.value.upper(),
         "currency": currency,
         "balance": balance,
         "locked_amount": locked_amount,
@@ -489,6 +494,34 @@ def refresh_token():
     ) + datetime.timedelta(hours=24*30)}
     encoded = jwt.encode(payload, secret, algorithm="HS256")
     return jsonify({"token": encoded}), 200
+
+@app.route('/api/verification-info', methods=['GET'])
+@token_required
+def api_verification_info():
+    """Get user verification information from database"""
+    try:
+        user = g.user
+        profile = user.profile if hasattr(user, 'profile') and user.profile else None
+        
+        email_verified = profile.email_verified if profile else False
+        phone_verified = profile.phone_verified if profile else False
+        
+        return jsonify({
+            "success": True,
+            "verification_status": "verified" if email_verified and phone_verified else "pending",
+            "verification_level": "basic" if email_verified else "none",
+            "kyc_status": "approved" if email_verified and phone_verified else "pending",
+            "documents_uploaded": email_verified,
+            "phone_verified": phone_verified,
+            "email_verified": email_verified
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Error getting verification info: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to get verification info"
+        }), 500
 
 def bootstrap():
     logger.info("Starting auth consumer")

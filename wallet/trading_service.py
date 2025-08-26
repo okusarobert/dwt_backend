@@ -11,8 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy.orm import Session
 from db.connection import get_session
 from db.wallet import (
-    Trade, TradeType, TradeStatus, PaymentMethod, PaymentProvider,
-    Transaction, TransactionType, TransactionStatus, Account,
+    Account, Transaction, Trade, TradeStatus, TradeType, PaymentMethod, TransactionType, CryptoAddress, AccountType, Reservation, ReservationType, PaymentProvider, TransactionStatus, 
     Voucher, VoucherStatus
 )
 from db.models import User
@@ -34,6 +33,8 @@ class TradingService:
         self.session = session
         if session:
             self.accounting_service = TradingAccountingService(session)
+            from reserve_service import ReserveService
+            self.reserve_service = ReserveService(session)
     
     def get_exchange_rate(self, from_currency: str, to_currency: str) -> float:
         """Get exchange rate between two currencies"""
@@ -97,9 +98,10 @@ class TradingService:
             fiat_amount = gross_fiat - fee_amount
             
         # Convert to smallest units using unified precision system
-        crypto_amount_smallest = AmountConverter.to_smallest_units(crypto_amount, crypto_currency)
-        fiat_amount_smallest = AmountConverter.to_smallest_units(fiat_amount, fiat_currency)
-        fee_amount_smallest = AmountConverter.to_smallest_units(fee_amount, fiat_currency)
+        from decimal import Decimal
+        crypto_amount_smallest = AmountConverter.to_smallest_units(Decimal(str(crypto_amount)), crypto_currency)
+        fiat_amount_smallest = AmountConverter.to_smallest_units(Decimal(str(fiat_amount)), fiat_currency)
+        fee_amount_smallest = AmountConverter.to_smallest_units(Decimal(str(fee_amount)), fiat_currency)
             
         return {
             "crypto_amount": crypto_amount,
@@ -117,6 +119,48 @@ class TradingService:
         # All payment methods now have 1% fee
         return 0.01  # 1%
     
+    def get_quote_for_crypto_amount(
+        self,
+        crypto_currency: str,
+        fiat_currency: str,
+        crypto_amount: float,
+        payment_method: PaymentMethod
+    ) -> Dict:
+        """Get quote for buying specified crypto amount - returns total fiat cost including fees"""
+        
+        # Get current price
+        price = self.get_crypto_price(crypto_currency, fiat_currency)
+        
+        # Calculate fees based on payment method
+        fee_percentage = self._get_fee_percentage(payment_method)
+        
+        # Calculate costs
+        gross_fiat = crypto_amount * price  # Base cost without fees
+        fee_amount = gross_fiat * fee_percentage  # Fee amount
+        total_fiat_cost = gross_fiat + fee_amount  # Total user pays
+        
+        # Convert to smallest units for precision
+        crypto_amount_smallest = AmountConverter.to_smallest_units(crypto_amount, crypto_currency)
+        gross_fiat_smallest = AmountConverter.to_smallest_units(gross_fiat, fiat_currency)
+        fee_amount_smallest = AmountConverter.to_smallest_units(fee_amount, fiat_currency)
+        total_fiat_smallest = AmountConverter.to_smallest_units(total_fiat_cost, fiat_currency)
+        
+        return {
+            "crypto_currency": crypto_currency.upper(),
+            "crypto_amount": crypto_amount,
+            "crypto_amount_smallest_unit": crypto_amount_smallest,
+            "fiat_currency": fiat_currency.upper(),
+            "gross_fiat_cost": gross_fiat,
+            "gross_fiat_cost_smallest_unit": gross_fiat_smallest,
+            "fee_amount": fee_amount,
+            "fee_amount_smallest_unit": fee_amount_smallest,
+            "total_fiat_cost": total_fiat_cost,
+            "total_fiat_cost_smallest_unit": total_fiat_smallest,
+            "exchange_rate": price,
+            "fee_percentage": fee_percentage,
+            "payment_method": payment_method.value
+        }
+    
     def create_trade(
         self,
         user_id: int,
@@ -130,6 +174,22 @@ class TradingService:
     ) -> Trade:
         """Create a new trade"""
         
+        # Check reserve sufficiency before creating trade
+        if hasattr(self, 'reserve_service') and trade_type == TradeType.BUY:
+            from db.wallet import AccountType
+            # For buy trades, check if we have enough crypto in reserves
+            amounts = self.calculate_trade_amounts(
+                crypto_currency, fiat_currency, amount, trade_type, payment_method
+            )
+            crypto_amount_needed = amounts["crypto_amount"]
+            
+            reserve_check = self.reserve_service.check_reserve_sufficiency(
+                crypto_currency, crypto_amount_needed, AccountType.CRYPTO, "trading"
+            )
+            
+            if not reserve_check["is_sufficient"]:
+                raise ValueError(f"Insufficient liquidity reserves for {crypto_currency}. Available: {reserve_check['available_amount']}, Required: {reserve_check['required_amount']}")
+        
         # Get or create user account for the crypto currency
         account = session.query(Account).filter(
             Account.user_id == user_id,
@@ -137,28 +197,16 @@ class TradingService:
         ).first()
         
         if not account:
-            # Auto-create crypto account for the user
-            from service import generate_random_digits
-            from db.wallet import AccountType
-            
-            account_number = f"{generate_random_digits(10)}"
-            account = Account(
-                user_id=user_id,
-                currency=crypto_currency,
-                account_type=AccountType.CRYPTO,
-                balance=0.0,
-                locked_amount=0.0,
-                account_number=account_number,
-                label=f"{crypto_currency} Account"
-            )
-            session.add(account)
-            session.flush()  # Get the account ID without committing
-            logger.info(f"Auto-created {crypto_currency} account for user {user_id}")
+            # Fail if user doesn't have required crypto account
+            error_msg = f"User {user_id} does not have a {crypto_currency} account. Account must be created before trading."
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         
-        # Calculate amounts
-        amounts = self.calculate_trade_amounts(
-            crypto_currency, fiat_currency, amount, trade_type, payment_method
-        )
+        # Calculate amounts (reuse if already calculated above)
+        if 'amounts' not in locals():
+            amounts = self.calculate_trade_amounts(
+                crypto_currency, fiat_currency, amount, trade_type, payment_method
+            )
         
         # Create trade with unified precision system
         trade = Trade(
@@ -199,6 +247,13 @@ class TradingService:
                 "phone_number": payment_details.get("phone_number"),
                 "provider": payment_details.get("provider")
             })
+            # Also store in payment_metadata for compatibility
+            if not trade.payment_metadata:
+                trade.payment_metadata = {}
+            trade.payment_metadata.update({
+                "phone_number": payment_details.get("phone_number"),
+                "provider": payment_details.get("provider")
+            })
         elif payment_method == PaymentMethod.BANK_DEPOSIT:
             # Store bank details in both metadata and dedicated fields
             trade.bank_name = payment_details.get("bank_name")
@@ -226,7 +281,12 @@ class TradingService:
     def process_mobile_money_payment(self, trade: Trade, session: Session) -> bool:
         """Process mobile money payment using existing Relworx deposit logic"""
         try:
-            if not trade.phone_number:
+            # Get phone number from payment metadata
+            phone_number = None
+            if trade.payment_metadata and 'phone_number' in trade.payment_metadata:
+                phone_number = trade.payment_metadata['phone_number']
+            
+            if not phone_number:
                 raise ValueError("Phone number required for mobile money payment")
             
             # Use existing Relworx request_payment method (same as deposit)
@@ -235,7 +295,7 @@ class TradingService:
             
             response = self.relworx_client.request_payment(
                 reference=reference_id,
-                msisdn=trade.phone_number,
+                msisdn=phone_number,
                 amount=float(trade.fiat_amount),
                 description=description
             )
@@ -322,8 +382,8 @@ class TradingService:
                 raise ValueError(f"Account {trade.account_id} not found")
             
             # Credit user's crypto balance using unified precision
-            current_balance = account.balance_smallest_unit or 0
-            account.balance_smallest_unit = current_balance + trade.crypto_amount_smallest_unit
+            current_balance = account.crypto_balance_smallest_unit or 0
+            account.crypto_balance_smallest_unit = current_balance + trade.crypto_amount_smallest_unit
             account.balance = float(account.balance) + float(trade.crypto_amount)  # Backward compatibility
             
             # Debit crypto from reserve account (we gave crypto to user)
@@ -339,6 +399,10 @@ class TradingService:
             
             session.commit()
             
+            # Send WebSocket notification for trade completion
+            logger.info(f"🔔 About to send trade completion notification for trade {trade.id}")
+            self._send_trade_completion_notification(trade)
+            
             logger.info(f"✅ Completed buy trade {trade.id}: {AmountConverter.format_display_amount(trade.crypto_amount_smallest_unit, trade.crypto_currency)}")
             return True
             
@@ -348,51 +412,155 @@ class TradingService:
     
     def _complete_sell_trade(self, trade: Trade, session: Session) -> bool:
         """Complete sell trade - user sells crypto, receives fiat via mobile money"""
+        reservation_ref = None
         try:
             # Get user's crypto account
             account = session.query(Account).filter_by(id=trade.account_id).first()
             if not account:
                 raise ValueError(f"Account {trade.account_id} not found")
             
-            # Check sufficient balance
-            available_balance = account.balance_smallest_unit or 0
+            # Get available balance in smallest units for unified precision
+            available_balance = account.crypto_balance_smallest_unit or 0
+
+            logger.info(f"Available balance: {available_balance}")
+            logger.info(f"Trade crypto amount: {trade.crypto_amount_smallest_unit}")
+            
             if available_balance < trade.crypto_amount_smallest_unit:
-                raise ValueError("Insufficient crypto balance")
+                raise ValueError(f"Insufficient crypto balance: ACCOUNT ID: {trade.account_id}  {available_balance} < {trade.crypto_amount_smallest_unit}")
             
-            # Debit user's crypto balance using unified precision
-            account.balance_smallest_unit = available_balance - trade.crypto_amount_smallest_unit
-            account.balance = float(account.balance) - float(trade.crypto_amount)  # Backward compatibility
+            # Step 1: Create reservation to lock funds (don't debit balance yet)
+            reservation_ref = self._create_sell_trade_reservation(trade, account, session)
             
-            # Credit crypto to reserve account (we received crypto from user)
-            self._adjust_reserve_balance(trade.crypto_currency, trade.crypto_amount_smallest_unit, session)
+            # Update trade status to processing
+            trade.status = TradeStatus.PROCESSING
+            session.commit()  # Commit reservation first
             
-            # Update trade status
-            trade.status = TradeStatus.PROCESSING_PAYOUT
-            
-            # Create accounting entries (debit user crypto, credit reserve)
-            if self.session and hasattr(self, 'accounting_service'):
-                self._create_sell_trade_accounting_entry(trade, account)
-            
-            # Initiate mobile money payout via Relworx
+            # Step 2: Initiate mobile money payout via Relworx
             if trade.payment_method == PaymentMethod.MOBILE_MONEY:
                 payout_success = self._initiate_mobile_money_payout(trade, session)
                 if not payout_success:
-                    # Rollback balance change and reserve adjustment
-                    account.balance_smallest_unit = available_balance
-                    account.balance = float(account.balance) + float(trade.crypto_amount)
-                    self._adjust_reserve_balance(trade.crypto_currency, -trade.crypto_amount_smallest_unit, session)
+                    # Cancel reservation and fail trade
+                    self._cancel_sell_trade_reservation(reservation_ref, account, session)
                     trade.status = TradeStatus.FAILED
                     session.commit()
+                    logger.error(f"❌ Mobile money payout failed for trade {trade.id}, reservation cancelled")
                     return False
+            
+            # Step 3: Keep trade in PROCESSING - finalization happens via webhook
+            # Don't finalize here - wait for webhook confirmation
             
             session.commit()
             
-            logger.info(f"✅ Processing sell trade {trade.id}: {AmountConverter.format_display_amount(trade.crypto_amount_smallest_unit, trade.crypto_currency)}")
+            logger.info(f"✅ Completed sell trade {trade.id}: {AmountConverter.format_display_amount(trade.crypto_amount_smallest_unit, trade.crypto_currency)}")
             return True
             
         except Exception as e:
             logger.error(f"Error completing sell trade {trade.id}: {e}")
+            # If we have a reservation, cancel it on error
+            if reservation_ref:
+                try:
+                    self._cancel_sell_trade_reservation(reservation_ref, account, session)
+                except Exception as cancel_error:
+                    logger.error(f"Failed to cancel reservation {reservation_ref}: {cancel_error}")
             raise
+    
+    def _create_sell_trade_reservation(self, trade: Trade, account: Account, session: Session) -> str:
+        """Create a reservation to lock funds for sell trade"""
+        import time
+        reservation_ref = f"sell_trade_{trade.id}_{int(time.time() * 1000)}"
+        
+        # Lock the amount in the account
+        current_locked = account.crypto_locked_amount_smallest_unit or 0
+        account.crypto_locked_amount_smallest_unit = current_locked + trade.crypto_amount_smallest_unit
+        
+        # Create reservation record
+        reservation = Reservation(
+            user_id=account.user_id,
+            reference=reservation_ref,
+            amount=float(trade.crypto_amount),
+            type=ReservationType.RESERVE,
+            status="active"
+        )
+        
+        session.add(reservation)
+        logger.info(f"🔒 Created sell trade reservation: {reservation_ref} for {AmountConverter.format_display_amount(trade.crypto_amount_smallest_unit, trade.crypto_currency)}")
+        
+        return reservation_ref
+    
+    def _cancel_sell_trade_reservation(self, reservation_ref: str, account: Account, session: Session):
+        """Cancel a sell trade reservation and unlock funds"""
+        if not reservation_ref:
+            return
+            
+        # Find and update the reservation
+        reservation = session.query(Reservation).filter_by(
+            reference=reservation_ref,
+            type=ReservationType.RESERVE,
+            status="active"
+        ).first()
+        
+        if reservation:
+            # Unlock the funds
+            current_locked = account.crypto_locked_amount_smallest_unit or 0
+            amount_to_unlock = int(reservation.amount * (10 ** 8))  # Convert back to smallest units
+            new_locked = current_locked - amount_to_unlock
+            if new_locked < 0:
+                new_locked = 0
+            account.crypto_locked_amount_smallest_unit = new_locked
+            
+            # Mark reservation as cancelled
+            reservation.status = "cancelled"
+            
+            logger.info(f"🔓 Cancelled sell trade reservation: {reservation_ref}")
+        else:
+            logger.warning(f"Reservation {reservation_ref} not found for cancellation")
+    
+    def _finalize_sell_trade(self, trade: Trade, account: Account, reservation_ref: str, session: Session):
+        """Finalize sell trade - debit balance, credit reserve, complete reservation"""
+        logger.info(f"🔄 Finalizing sell trade {trade.id}: debiting {AmountConverter.format_display_amount(trade.crypto_amount_smallest_unit, trade.crypto_currency)}")
+        
+        # Debit user's crypto balance
+        total_balance = account.crypto_balance_smallest_unit or 0
+        locked_amount = account.crypto_locked_amount_smallest_unit or 0
+        available_balance = total_balance - locked_amount
+        new_total_balance = total_balance - trade.crypto_amount_smallest_unit
+        logger.info(f"💰 Total balance: {total_balance}, Locked: {locked_amount}, Available: {available_balance}")
+        logger.info(f"💰 New total balance: {total_balance} -> {new_total_balance} (debiting {trade.crypto_amount_smallest_unit})")
+        account.crypto_balance_smallest_unit = new_total_balance
+        account.balance = float(account.balance) - float(trade.crypto_amount)  # Backward compatibility
+        
+        # Unlock the reserved funds
+        current_locked = account.crypto_locked_amount_smallest_unit or 0
+        new_locked = current_locked - trade.crypto_amount_smallest_unit
+        logger.info(f"🔓 Locked amount: {current_locked} -> {new_locked} (unlocking {trade.crypto_amount_smallest_unit})")
+        account.crypto_locked_amount_smallest_unit = new_locked
+        
+        # Credit crypto to reserve account
+        self._adjust_reserve_balance(trade.crypto_currency, trade.crypto_amount_smallest_unit, session)
+        
+        # Complete the reservation
+        if reservation_ref:
+            reservation = session.query(Reservation).filter_by(
+                reference=reservation_ref,
+                type=ReservationType.RESERVE,
+                status="active"
+            ).first()
+            
+            if reservation:
+                reservation.status = "completed"
+                logger.info(f"✅ Completed sell trade reservation: {reservation_ref}")
+        
+        # Create accounting entries
+        if self.session and hasattr(self, 'accounting_service'):
+            self._create_sell_trade_accounting_entry(trade, account)
+        
+        # Update trade status
+        trade.status = TradeStatus.COMPLETED
+        trade.completed_at = datetime.datetime.utcnow()
+        
+        # Send WebSocket notification for trade completion
+        logger.info(f"🔔 About to send trade completion notification for trade {trade.id}")
+        self._send_trade_completion_notification(trade)
     
     def _create_buy_trade_accounting_entry(self, trade: Trade, account: Account):
         """Create accounting entry for buy trade"""
@@ -476,7 +644,63 @@ class TradingService:
             
         except Exception as e:
             logger.error(f"Error creating sell trade accounting entry: {e}")
-            raise
+            # Don't fail the trade for accounting errors
+            pass
+    
+    def _send_trade_completion_notification(self, trade: Trade):
+        """Send trade completion notification via Redis pub/sub"""
+        try:
+            import redis
+            import json
+            import os
+            
+            # Get Redis connection details
+            redis_host = os.environ.get('REDIS_HOST', 'redis')
+            redis_port = int(os.environ.get('REDIS_PORT', 6379))
+            redis_password = os.environ.get('REDIS_PASSWORD', None)
+            redis_db = int(os.environ.get('REDIS_DB', 0))
+
+            redis_kwargs = {
+                "host": redis_host,
+                "port": redis_port,
+                "db": redis_db,
+                "socket_connect_timeout": 5,
+                "socket_timeout": 5,
+                "retry_on_timeout": True
+            }
+            if redis_password:
+                redis_kwargs["password"] = redis_password
+
+            r = redis.Redis(**redis_kwargs)
+            
+            # Prepare notification data
+            notification_data = {
+                'type': 'trade_status_update',
+                'trade_id': trade.id,
+                'data': {
+                    'status': 'completed',
+                    'message': f'Trade #{trade.id} completed successfully',
+                    'trade_type': trade.trade_type.value if hasattr(trade.trade_type, 'value') else str(trade.trade_type),
+                    'crypto_currency': trade.crypto_currency,
+                    'crypto_amount': float(trade.crypto_amount),
+                    'fiat_amount': float(trade.fiat_amount),
+                    'completed_at': trade.completed_at.isoformat() if trade.completed_at else None
+                },
+                'timestamp': trade.completed_at.isoformat() if trade.completed_at else None
+            }
+            
+            logger.info(f"🔔 PUBLISHING trade completion to Redis channel 'trade_updates' for trade {trade.id}")
+            logger.info(f"🔔 Notification data: {notification_data}")
+            
+            # Publish to Redis channel
+            message = json.dumps(notification_data)
+            result = r.publish('trade_updates', message)
+            
+            logger.info(f"✅ PUBLISHED trade completion notification for trade {trade.id} to {result} subscribers")
+                
+        except Exception as e:
+            logger.error(f"💥 ERROR publishing trade completion notification for trade {trade.id}: {e}")
+            # Don't fail the trade for notification errors
     
     def _adjust_reserve_balance(self, currency: str, amount_smallest_unit: int, session: Session):
         """Adjust reserve account balance for trading operations"""
@@ -493,14 +717,15 @@ class TradingService:
             
             if reserve_account:
                 # Update reserve balance using unified precision
-                current_balance = reserve_account.balance_smallest_unit or 0
-                new_balance = current_balance + amount_smallest_unit
+                current_balance = int(reserve_account.crypto_balance_smallest_unit or 0)
+                amount_int = int(amount_smallest_unit)
+                new_balance = current_balance + amount_int
                 
                 if new_balance < 0:
                     logger.warning(f"Reserve balance for {currency} would go negative: {new_balance}")
                 
-                reserve_account.balance_smallest_unit = new_balance
-                reserve_account.balance = float(reserve_account.balance or 0) + (amount_smallest_unit / (10 ** 8))  # Assuming 8 decimal places
+                reserve_account.crypto_balance_smallest_unit = new_balance
+                reserve_account.balance = float(reserve_account.balance or 0) + (float(amount_smallest_unit) / (10 ** 8))  # Assuming 8 decimal places
                 
                 action = "credited" if amount_smallest_unit > 0 else "debited"
                 logger.info(f"💰 Reserve {action}: {AmountConverter.format_display_amount(abs(amount_smallest_unit), currency)} {currency}")
@@ -514,7 +739,12 @@ class TradingService:
     def _initiate_mobile_money_payout(self, trade: Trade, session: Session) -> bool:
         """Initiate mobile money payout via Relworx"""
         try:
-            if not trade.phone_number:
+            # Get phone number from payment metadata
+            phone_number = None
+            if trade.payment_metadata and 'phone_number' in trade.payment_metadata:
+                phone_number = trade.payment_metadata['phone_number']
+            
+            if not phone_number:
                 raise ValueError("Phone number required for mobile money payout")
             
             reference_id = f"PAYOUT_{trade.id}"
@@ -523,7 +753,7 @@ class TradingService:
             # Use Relworx to send money to user
             response = self.relworx_client.send_payment(
                 reference=reference_id,
-                msisdn=trade.phone_number,
+                msisdn=phone_number,
                 amount=float(trade.fiat_amount),
                 description=description
             )
@@ -609,15 +839,13 @@ class TradingService:
             if not user_crypto_account:
                 raise ValueError(f"User crypto account not found for {trade.crypto_currency}")
             
-            # Get reserve account
-            reserve_account = session.query(Account).filter(
-                Account.currency == trade.crypto_currency,
-                Account.account_type == AccountType.CRYPTO,
-                Account.label == "reserve"
-            ).first()
+            # Get or create reserve account
+            from reserve_service import ReserveService
+            reserve_service = ReserveService(session)
+            reserve_account = reserve_service.get_reserve_account(trade.crypto_currency, AccountType.CRYPTO)
             
             if not reserve_account:
-                raise ValueError(f"Reserve account not found for {trade.crypto_currency}")
+                raise ValueError(f"Failed to create reserve account for {trade.crypto_currency}")
             
             # Get or create fee collection account
             fee_account = session.query(Account).filter(
@@ -629,8 +857,10 @@ class TradingService:
             if not fee_account:
                 # Create fee collection account if it doesn't exist
                 from db.utils import generate_unique_account_number
+                import os
+                system_user_id = int(os.getenv("WALLET_SYSTEM_USER_ID", "1"))
                 fee_account = Account(
-                    user_id=1,  # Admin user ID
+                    user_id=system_user_id,
                     balance=0,
                     locked_amount=0,
                     currency=trade.fee_currency,
@@ -642,13 +872,18 @@ class TradingService:
                 session.flush()  # Get the ID
             
             # Create crypto transaction (reserve to user)
+            # Format amounts for better display
+            crypto_display = AmountConverter.format_display_amount(trade.crypto_amount_smallest_unit, trade.crypto_currency)
+            fiat_display = AmountConverter.format_display_amount(trade.fiat_amount_smallest_unit, trade.fiat_currency)
+            
             crypto_transaction = Transaction(
                 account_id=user_crypto_account.id,
                 reference_id=f"BUY_{trade.id}",
                 amount=trade.crypto_amount,
+                amount_smallest_unit=trade.crypto_amount_smallest_unit,
                 type=TransactionType.BUY_CRYPTO,
                 status=TransactionStatus.COMPLETED,
-                description=f"Buy {trade.crypto_currency}",
+                description=f"Bought {crypto_display} for {fiat_display}",
                 trade_id=trade.id
             )
             
@@ -657,9 +892,10 @@ class TradingService:
                 account_id=reserve_account.id,
                 reference_id=f"BUY_FIAT_{trade.id}",
                 amount=trade.fiat_amount - trade.fee_amount,  # Net amount after fee
+                amount_smallest_unit=trade.fiat_amount_smallest_unit - trade.fee_amount_smallest_unit,
                 type=TransactionType.BUY_CRYPTO,
                 status=TransactionStatus.COMPLETED,
-                description=f"Payment for {trade.crypto_currency}",
+                description=f"Payment for {crypto_display}",
                 trade_id=trade.id
             )
             
@@ -668,9 +904,10 @@ class TradingService:
                 account_id=fee_account.id,
                 reference_id=f"FEE_{trade.id}",
                 amount=trade.fee_amount,
+                amount_smallest_unit=trade.fee_amount_smallest_unit,
                 type=TransactionType.BUY_CRYPTO,
                 status=TransactionStatus.COMPLETED,
-                description=f"Trading fee for {trade.crypto_currency} {trade.trade_type.value}",
+                description=f"Trading fee for {crypto_display}",
                 trade_id=trade.id,
                 metadata_json={"fee_type": "trading_fee", "trade_id": trade.id}
             )
@@ -680,18 +917,18 @@ class TradingService:
             session.add(fee_transaction)
             
             # Update balances using unified precision system
-            user_crypto_account.balance = float(user_crypto_account.balance or 0) + trade.crypto_amount
+            user_crypto_account.balance = float(user_crypto_account.balance or 0) + float(trade.crypto_amount)
             user_crypto_account.crypto_balance_smallest_unit = (
                 user_crypto_account.crypto_balance_smallest_unit or 0
             ) + trade.crypto_amount_smallest_unit
             
-            reserve_account.balance = float(reserve_account.balance or 0) - trade.crypto_amount
+            reserve_account.balance = float(reserve_account.balance or 0) - float(trade.crypto_amount)
             reserve_account.crypto_balance_smallest_unit = (
                 reserve_account.crypto_balance_smallest_unit or 0
             ) - trade.crypto_amount_smallest_unit
             
             # Update fee collection account
-            fee_account.balance = (fee_account.balance or 0) + trade.fee_amount
+            fee_account.balance = float(fee_account.balance or 0) + float(trade.fee_amount)
             
             # Link transactions to trade
             trade.crypto_transaction_id = crypto_transaction.id
@@ -745,8 +982,10 @@ class TradingService:
             if not fee_account:
                 # Create fee collection account if it doesn't exist
                 from db.utils import generate_unique_account_number
+                import os
+                system_user_id = int(os.getenv("WALLET_SYSTEM_USER_ID", "1"))
                 fee_account = Account(
-                    user_id=1,  # Admin user ID
+                    user_id=system_user_id,
                     balance=0,
                     locked_amount=0,
                     currency=trade.fee_currency,
@@ -821,29 +1060,29 @@ class TradingService:
             
             # Update balances using unified precision system
             # Debit user's crypto
-            user_crypto_account.balance = float(user_crypto_account.balance or 0) - trade.crypto_amount
+            user_crypto_account.balance = float(user_crypto_account.balance or 0) - float(trade.crypto_amount)
             user_crypto_account.crypto_balance_smallest_unit = (
                 user_crypto_account.crypto_balance_smallest_unit or 0
             ) - trade.crypto_amount_smallest_unit
             
             # Credit crypto reserve
-            crypto_reserve.balance = float(crypto_reserve.balance or 0) + trade.crypto_amount
+            crypto_reserve.balance = float(crypto_reserve.balance or 0) + float(trade.crypto_amount)
             crypto_reserve.crypto_balance_smallest_unit = (
                 crypto_reserve.crypto_balance_smallest_unit or 0
             ) + trade.crypto_amount_smallest_unit
             
             # Update fiat balances (net amount after fee)
-            net_fiat_amount = trade.fiat_amount - trade.fee_amount
+            net_fiat_amount = float(trade.fiat_amount) - float(trade.fee_amount)
             net_fiat_smallest = trade.fiat_amount_smallest_unit - trade.fee_amount_smallest_unit
             
             # Debit fiat reserve
-            fiat_reserve.balance = (fiat_reserve.balance or 0) - trade.fiat_amount
+            fiat_reserve.balance = float(fiat_reserve.balance or 0) - float(trade.fiat_amount)
             
             # Credit user's fiat account (net amount)
-            user_fiat_account.balance = (user_fiat_account.balance or 0) + net_fiat_amount
+            user_fiat_account.balance = float(user_fiat_account.balance or 0) + net_fiat_amount
             
             # Update fee collection account
-            fee_account.balance = (fee_account.balance or 0) + trade.fee_amount
+            fee_account.balance = float(fee_account.balance or 0) + float(trade.fee_amount)
             
             # Link transactions to trade
             trade.crypto_transaction_id = crypto_transaction.id
@@ -864,8 +1103,8 @@ class TradingService:
             message = {
                 "trade_id": trade.id,
                 "user_id": trade.user_id,
-                "trade_type": trade.trade_type,  # Already a string value
-                "payment_method": trade.payment_method,  # Already a string value
+                "trade_type": trade.trade_type.value,  # Convert enum to string
+                "payment_method": trade.payment_method.value,  # Convert enum to string
                 "amount": float(trade.fiat_amount),
                 "currency": trade.fiat_currency
             }
@@ -875,8 +1114,8 @@ class TradingService:
         except Exception as e:
             logger.error(f"Error sending trade to Kafka: {e}")
     
-    def _send_trade_completion_notification(self, trade: Trade):
-        """Send trade completion notification"""
+    def _send_trade_completion_notification_kafka(self, trade: Trade):
+        """Send trade completion notification via Kafka (legacy)"""
         try:
             message = {
                 "trade_id": trade.id,

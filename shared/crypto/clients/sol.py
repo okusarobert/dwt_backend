@@ -837,23 +837,39 @@ class SOLWallet:
             self.logger.error(f"Error getting SPL token info: {e}")
             return None
 
+    def _generate_deterministic_keypair(self, user_id: int, index: int) -> 'Keypair':
+        """Generate a deterministic Solana keypair using user_id and index"""
+        try:
+            # Create a deterministic seed using user_id and index
+            base_seed = b'dwt_solana_wallet_seed_v1'
+            user_bytes = user_id.to_bytes(8, 'big')
+            index_bytes = index.to_bytes(4, 'big')
+            
+            import hashlib
+            combined_seed = base_seed + user_bytes + index_bytes
+            seed_hash = hashlib.sha256(combined_seed).digest()
+            
+            # Create keypair from the 32-byte seed
+            keypair = Keypair.from_seed(seed_hash)
+            return keypair
+            
+        except Exception as e:
+            self.logger.error(f"Error generating deterministic keypair: {e}")
+            raise
+
     def generate_new_address(self, index: int = None) -> Optional[Dict]:
-        """Generate a new unique Solana address for the wallet"""
+        """Generate a deterministic Solana address for the wallet using seed derivation"""
         try:
             if not SOLANA_AVAILABLE:
                 self.logger.error("Solana SDK not available")
                 return None
             
-            # Use provided index or find next available
+            # Use account_id as the index for deterministic generation
             if index is None:
-                existing_addresses = self.session.query(CryptoAddress).filter_by(
-                    account_id=self.account_id,
-                    currency_code=self.symbol
-                ).all()
-                index = len(existing_addresses)
+                index = self.account_id
             
-            # Generate a new Solana keypair
-            keypair = Keypair()
+            # Generate deterministic keypair using seed + user_id + account_id
+            keypair = self._generate_deterministic_keypair(self.user_id, index)
             public_key = keypair.pubkey()
             # Store the full 64-byte keypair, not just the 32-byte secret
             private_key = base58.b58encode(bytes(keypair)).decode()

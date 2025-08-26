@@ -23,6 +23,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
     { href: "/admin", label: "Overview" },
     { href: "/admin/users", label: "Users" },
     { href: "/admin/reserves", label: "Reserves" },
+    { href: "/admin/currencies", label: "Currencies" },
   ]), []);
 
   const isActive = (href: string) => {

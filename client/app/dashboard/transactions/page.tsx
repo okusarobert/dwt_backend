@@ -24,7 +24,7 @@ import {
   ArrowUp,
   ArrowDown
 } from 'lucide-react';
-import { formatCryptoAmount } from '@/lib/currency-formatter';
+import { formatCryptoAmount, formatNumber } from '@/lib/currency-formatter';
 import { useTransactionsPaginated, useRefreshTransactions, type TransactionFilters } from '@/hooks/use-transactions';
 
 interface Transaction {
@@ -498,7 +498,7 @@ const TransactionHistoryPage = () => {
                         </td>
                         <td className="py-4 px-4 text-sm font-medium text-center">
                           <span className={isDeposit ? 'text-green-600' : isWithdrawal ? 'text-red-600' : ''}>
-                            {isDeposit ? '+' : isWithdrawal ? '-' : ''}{formatCryptoAmount(amount, currency)} {currency}
+                            {isDeposit ? '+' : isWithdrawal ? '-' : ''}{formatNumber(amount, currency === 'BTC' ? 8 : 6)} {currency}
                           </span>
                         </td>
                         <td className="py-4 px-4 text-center">

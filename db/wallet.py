@@ -120,6 +120,17 @@ class Account(Timestamped):
     def available_balance(self) -> float:
         """Get available balance (balance - locked_amount)"""
         return float(self.balance - self.locked_amount)
+    
+    def _convert_smallest_to_standard(self, smallest_units: int) -> float:
+        """Convert smallest units to standard currency units"""
+        from shared.currency_precision import AmountConverter
+        if smallest_units is None:
+            return 0.0
+        try:
+            return float(AmountConverter.from_smallest_units(smallest_units, self.currency))
+        except Exception:
+            # Fallback for unsupported currencies - assume 8 decimal places
+            return float(smallest_units / 100_000_000)
 
 class Voucher(Timestamped):
     """Voucher system for UGX and USD payments"""

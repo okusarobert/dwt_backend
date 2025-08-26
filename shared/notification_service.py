@@ -32,7 +32,8 @@ class NotificationService:
         wallet_address: str,
         block_number: Optional[int] = None,
         confirmations: int = 0,
-        status: str = "pending"
+        status: str = "pending",
+        transaction_id: Optional[int] = None
     ):
         """
         Send a crypto deposit notification to the user
@@ -64,7 +65,7 @@ class NotificationService:
                     "message": message,
                     "priority": priority,
                     "category": "deposit",
-                    "action_url": f"/wallet/transactions/{transaction_hash}"
+                    "action_url": f"/dashboard/transactions/{transaction_id}" if transaction_id else f"/dashboard/transactions?search={transaction_hash}"
                 },
                 "transaction": {
                     "hash": transaction_hash,
@@ -105,7 +106,8 @@ class NotificationService:
         amount_usd: Decimal,
         amount_ugx: Decimal,
         destination_address: str,
-        status: str = "pending"
+        status: str = "pending",
+        transaction_id: Optional[int] = None
     ):
         """Send a crypto withdrawal notification to the user"""
         try:
@@ -126,7 +128,7 @@ class NotificationService:
                     "message": f"Withdrawal of {amount} {crypto_symbol} is {status}",
                     "priority": "high",
                     "category": "withdrawal",
-                    "action_url": f"/dashboard/wallet?tx={transaction_hash}"
+                    "action_url": f"/dashboard/transactions/{transaction_id}" if transaction_id else f"/dashboard/transactions?search={transaction_hash}"
                 },
                 "timestamp": datetime.utcnow().isoformat(),
                 "created_at": datetime.utcnow().isoformat()
@@ -150,7 +152,8 @@ class NotificationService:
         crypto_symbol: str,
         confirmations: int,
         required_confirmations: int,
-        status: str
+        status: str,
+        transaction_id: Optional[int] = None
     ):
         """Send confirmation update notification"""
         try:
@@ -169,7 +172,7 @@ class NotificationService:
                     "message": f"Transaction has {confirmations}/{required_confirmations} confirmations",
                     "priority": "normal",
                     "category": "confirmation",
-                    "action_url": f"/dashboard/wallet?tx={transaction_hash}"
+                    "action_url": f"/dashboard/transactions/{transaction_id}" if transaction_id else f"/dashboard/transactions?search={transaction_hash}"
                 },
                 "timestamp": datetime.utcnow().isoformat(),
                 "created_at": datetime.utcnow().isoformat()

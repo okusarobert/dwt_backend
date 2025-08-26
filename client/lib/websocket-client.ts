@@ -20,20 +20,35 @@ export interface PriceUpdate {
   timestamp: string;
 }
 
+export interface TradeStatusUpdate {
+  type: string;
+  trade_id: string;
+  data: {
+    status?: string;
+    message?: string;
+    [key: string]: any;
+  };
+  timestamp: string;
+}
+
 class WebSocketClient {
-  private socket: Socket | null = null;
+  private _socket: Socket | null = null;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000;
   private priceCallbacks: ((prices: CryptoPrice[]) => void)[] = [];
   private connectionCallbacks: ((connected: boolean) => void)[] = [];
+  private tradeStatusCallbacks: ((update: TradeStatusUpdate) => void)[] = [];
+  private currencyChangeCallbacks: ((data: any) => void)[] = [];
   private usdToUgxRate = 3700; // Default rate, will be updated
+  private currentTradeId: string | null = null;
+  private connected = false;
 
   connect() {
     try {
       const wsUrl =
         process.env.NEXT_PUBLIC_WEBSOCKET_URL || "ws://localhost:5000";
-      this.socket = io(wsUrl, {
+      this._socket = io(wsUrl, {
         transports: ["websocket"],
         timeout: 60000,
         reconnection: true,
@@ -54,32 +69,35 @@ class WebSocketClient {
   }
 
   private setupEventHandlers() {
-    if (!this.socket) return;
+    if (!this._socket) return;
 
-    this.socket.on("connect", () => {
-      console.log("WebSocket connected");
-      this.reconnectAttempts = 0;
-      this.notifyConnectionChange(true);
-
-      // Subscribe to crypto price updates
-      this.socket?.emit("subscribe", { channel: "crypto-prices" });
+    this._socket.on('connect', () => {
+      console.log('WebSocket connected');
+      this.connected = true;
+      this.connectionCallbacks.forEach(callback => callback(true));
     });
 
-    this.socket.on("disconnect", () => {
-      console.log("WebSocket disconnected");
-      this.notifyConnectionChange(false);
+    this._socket.on('disconnect', () => {
+      console.log('WebSocket disconnected');
+      this.connected = false;
+      this.connectionCallbacks.forEach(callback => callback(false));
     });
 
-    this.socket.on("connect_error", (error) => {
-      console.error("WebSocket connection error:", error);
-      this.notifyConnectionChange(false);
+    this._socket.on('connect_error', (error) => {
+      console.error('WebSocket connection error:', error);
+      this.connected = false;
+      this.connectionCallbacks.forEach(callback => callback(false));
     });
 
-    this.socket.on("crypto-price-update", (data: PriceUpdate[]) => {
+    this._socket.on('debug_trade_update', (data) => {
+      console.log('🔔 DEBUG: Received debug trade update:', data);
+    });
+
+    this._socket.on("crypto-price-update", (data: PriceUpdate[]) => {
       this.handlePriceUpdate(data);
     });
 
-    this.socket.on("crypto-prices", (data: any[]) => {
+    this._socket.on("crypto-prices", (data: any[]) => {
       // Debug logging to check what we're receiving
       console.log("Raw crypto prices from backend:", data.slice(0, 2)); // Log first 2 items
       console.log("Current USD to UGX rate:", this.usdToUgxRate);
@@ -97,18 +115,40 @@ class WebSocketClient {
       this.notifyPriceCallbacks(convertedPrices);
     });
 
-    this.socket.on("reconnect", (attemptNumber) => {
+    this._socket.on("reconnect", (attemptNumber) => {
       console.log(`WebSocket reconnected after ${attemptNumber} attempts`);
       this.reconnectAttempts = 0;
       this.notifyConnectionChange(true);
 
       // Resubscribe to crypto price updates
-      this.socket?.emit("subscribe", { channel: "crypto-prices" });
+      this._socket?.emit("subscribe", { channel: "crypto-prices" });
     });
 
-    this.socket.on("reconnect_failed", () => {
+    this._socket.on("reconnect_failed", () => {
       console.error("WebSocket reconnection failed");
       this.notifyConnectionChange(false);
+    });
+
+    // Trade status update handler
+    this._socket.on("trade_status_update", (data: TradeStatusUpdate) => {
+      console.log("Trade status update received:", data);
+      this.notifyTradeStatusCallbacks(data);
+    });
+
+    // Trade room join confirmation
+    this._socket.on("joined_trade", (data: any) => {
+      console.log("Successfully joined trade room:", data);
+    });
+
+    // Currency change handler
+    this._socket.on("currency_change", (data: any) => {
+      console.log("Currency change received:", data);
+      this.notifyCurrencyChangeCallbacks(data);
+    });
+
+    // Error handler
+    this._socket.on("error", (error: any) => {
+      console.error("WebSocket error:", error);
     });
   }
 
@@ -153,6 +193,14 @@ class WebSocketClient {
     this.connectionCallbacks.forEach((callback) => callback(connected));
   }
 
+  private notifyTradeStatusCallbacks(update: TradeStatusUpdate) {
+    this.tradeStatusCallbacks.forEach((callback) => callback(update));
+  }
+
+  private notifyCurrencyChangeCallbacks(data: any) {
+    this.currencyChangeCallbacks.forEach((callback) => callback(data));
+  }
+
   private scheduleReconnect() {
     if (this.reconnectAttempts < this.maxReconnectAttempts) {
       this.reconnectAttempts++;
@@ -186,14 +234,14 @@ class WebSocketClient {
   }
 
   disconnect() {
-    if (this.socket) {
-      this.socket.disconnect();
-      this.socket = null;
+    if (this._socket) {
+      this._socket.disconnect();
+      this._socket = null;
     }
   }
 
   isConnected(): boolean {
-    return this.socket?.connected || false;
+    return this._socket?.connected || false;
   }
 
   // Update USD to UGX exchange rate
@@ -204,6 +252,68 @@ class WebSocketClient {
   // Get current exchange rate
   getExchangeRate(): number {
     return this.usdToUgxRate;
+  }
+
+  // Trade-specific methods
+  joinTradeRoom(tradeId: string) {
+    if (this._socket && this._socket.connected) {
+      this.currentTradeId = tradeId;
+      this._socket.emit('join_trade', { trade_id: tradeId });
+      console.log(`🔔 Joining trade room for trade ${tradeId}`);
+      
+      // Listen for join confirmation
+      this._socket.on('joined_trade', (data) => {
+        console.log('🔔 Successfully joined trade room:', data);
+      });
+      
+      this._socket.on('error', (error) => {
+        console.error('🔔 Error joining trade room:', error);
+      });
+    } else {
+      console.warn('🔔 Cannot join trade room - WebSocket not connected');
+    }
+  }
+
+  leaveTradeRoom(tradeId?: string) {
+    if (this._socket && this._socket.connected) {
+      const targetTradeId = tradeId || this.currentTradeId;
+      if (targetTradeId) {
+        this._socket.emit('leave_trade', { trade_id: targetTradeId });
+        console.log(`Leaving trade room: ${targetTradeId}`);
+        if (targetTradeId === this.currentTradeId) {
+          this.currentTradeId = null;
+        }
+      }
+    }
+  }
+
+  onTradeStatusUpdate(callback: (update: TradeStatusUpdate) => void) {
+    this.tradeStatusCallbacks.push(callback);
+    return () => {
+      const index = this.tradeStatusCallbacks.indexOf(callback);
+      if (index > -1) {
+        this.tradeStatusCallbacks.splice(index, 1);
+      }
+    };
+  }
+
+  getCurrentTradeId(): string | null {
+    return this.currentTradeId;
+  }
+
+  onCurrencyChange(callback: (data: any) => void) {
+    this.currencyChangeCallbacks.push(callback);
+    return () => {
+      const index = this.currencyChangeCallbacks.indexOf(callback);
+      if (index > -1) {
+        this.currencyChangeCallbacks.splice(index, 1);
+      }
+    };
+  }
+
+  // Expose socket for direct event handling if needed
+  get socket() {
+    return this._socket;
   }
 }
 

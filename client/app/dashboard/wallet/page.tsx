@@ -29,22 +29,15 @@ import { QRCodeSVG } from "qrcode.react";
 import { getCryptoLogo, createFallbackLogo } from "@/lib/crypto-logos";
 import { apiClient } from "@/lib/api-client";
 import { useCryptoPrices } from '@/hooks/use-crypto-prices';
-import { formatUGX, formatNumber, formatCryptoAmount } from '@/lib/currency-formatter';
-import NotificationCenter from '@/components/notifications/notification-center';
-import { MultiChainBalance } from '@/components/crypto/multi-chain-balance';
+import { websocketClient } from '@/lib/websocket-client';
 import { useRecentTransactions } from '@/hooks/use-transactions';
+import { formatUGX, formatNumber, formatCryptoAmount } from '@/lib/currency-formatter';
+import { MultiChainBalance } from '@/components/crypto/multi-chain-balance';
 import PnLDisplay from '@/components/wallet/pnl-display';
+import { MultiNetworkDeposit } from '@/components/wallet/multi-network-deposit';
 
-// Supported cryptocurrencies
-const supportedCryptos = [
-  { symbol: "BTC", name: "Bitcoin", decimals: 8 },
-  { symbol: "ETH", name: "Ethereum", decimals: 18 },
-  { symbol: "SOL", name: "Solana", decimals: 9 },
-  { symbol: "BNB", name: "BNB", decimals: 18 },
-  { symbol: "USDT", name: "Tether", decimals: 6 },
-  { symbol: "TRX", name: "Tron", decimals: 6 },
-  { symbol: "LTC", name: "Litecoin", decimals: 8 },
-];
+// Supported cryptocurrencies - will be loaded dynamically from admin API
+const supportedCryptos: any[] = [];
 
 interface CryptoBalance {
   symbol: string;
@@ -77,7 +70,7 @@ export default function WalletPage() {
   const [totalValueUSD, setTotalValueUSD] = useState(0);
   const [isLoadingBalances, setIsLoadingBalances] = useState(true);
   const [showBalances, setShowBalances] = useState(true);
-  const [selectedCrypto, setSelectedCrypto] = useState("BTC");
+  const [selectedCrypto, setSelectedCrypto] = useState("");
   const [isGeneratingAddress, setIsGeneratingAddress] = useState(false);
   const [withdrawAmount, setWithdrawAmount] = useState("");
   const [withdrawAddress, setWithdrawAddress] = useState("");
@@ -85,9 +78,18 @@ export default function WalletPage() {
   const [logoErrors, setLogoErrors] = useState<Record<string, boolean>>({});
   const [showDepositDialog, setShowDepositDialog] = useState(false);
   const [showWithdrawDialog, setShowWithdrawDialog] = useState(false);
-  const [viewMode, setViewMode] = useState<'coin' | 'wallet' | 'enhanced'>('coin');
+  const [showMultiNetworkDeposit, setShowMultiNetworkDeposit] = useState(false);
+  const [viewMode, setViewMode] = useState<'coin' | 'enhanced'>('coin');
+  const [enabledCurrencies, setEnabledCurrencies] = useState<any[]>([]);
 
   const { prices, getCryptoBySymbol } = useCryptoPrices();
+  
+  // WebSocket connection for real-time updates
+  const [socket, setSocket] = useState<any>(null);
+  
+  useEffect(() => {
+    setSocket(websocketClient);
+  }, []);
   
   // Use TanStack Query for recent transactions
   const { 
@@ -139,6 +141,29 @@ export default function WalletPage() {
     }
   }, [prices, getCryptoBySymbol, balances]); // Real-time updates when prices change
 
+  // Extract enabled currencies from balance response
+  const extractCurrenciesFromBalances = (balanceResponse: any) => {
+    const currencies: any[] = [];
+    
+    if (balanceResponse.balances) {
+      // Extract currencies from balance keys
+      Object.keys(balanceResponse.balances).forEach(symbol => {
+        currencies.push({
+          symbol: symbol,
+          name: symbol.toUpperCase(), // Use symbol as name for now
+          enabled: true // Only enabled currencies are returned by backend
+        });
+      });
+    }
+    
+    setEnabledCurrencies(currencies);
+    
+    // Set first currency as default if none selected
+    if (!selectedCrypto && currencies.length > 0) {
+      setSelectedCrypto(currencies[0].symbol);
+    }
+  };
+
   // Load crypto balances
   const loadBalances = async () => {
     try {
@@ -160,7 +185,7 @@ export default function WalletPage() {
         setTotalValueUSD(result.portfolio_value?.total_value_usd || 0);
         
         // Transform detailed balances for backward compatibility
-        const balanceList: CryptoBalance[] = supportedCryptos.map(crypto => {
+        const balanceList: CryptoBalance[] = enabledCurrencies.map(crypto => {
           const balanceData = result.aggregated_balances[crypto.symbol];
           if (!balanceData) {
             return {
@@ -190,20 +215,23 @@ export default function WalletPage() {
         // Use legacy API for backward compatibility
         const result = await apiClient.getCryptoBalances();
         
-        // Transform balances data
-        const balanceList: CryptoBalance[] = supportedCryptos.map(crypto => {
-          const balanceData = result.balances[crypto.symbol];
+        // Extract currencies from balance response (backend only returns enabled currencies)
+        extractCurrenciesFromBalances(result);
+        
+        // Transform balances data using currencies from the response
+        const balanceList: CryptoBalance[] = Object.keys(result.balances || {}).map(symbol => {
+          const balanceData = result.balances[symbol];
           const balance = typeof balanceData === 'object' ? balanceData.balance : (balanceData || 0);
           const address = typeof balanceData === 'object' ? balanceData.address : undefined;
           const memo = typeof balanceData === 'object' ? balanceData.memo : undefined;
           
           // Use existing price data from current balances state if available to prevent UI flicker
-          const existingBalance = balances.find(b => b.symbol === crypto.symbol);
-          const priceData = getCryptoBySymbol(crypto.symbol);
+          const existingBalance = balances.find(b => b.symbol === symbol);
+          const priceData = getCryptoBySymbol(symbol);
           const balance_ugx = balance * (priceData?.price || (existingBalance ? existingBalance.balance_ugx / existingBalance.balance : 0) || 0);
           
           return {
-            symbol: crypto.symbol,
+            symbol,
             balance,
             balance_usd: balance * (priceData?.priceUsd || (existingBalance ? existingBalance.balance_usd / existingBalance.balance : 0) || 0),
             balance_ugx,
@@ -287,7 +315,21 @@ export default function WalletPage() {
     if (user) {
       loadBalances();
     }
-  }, [user]); // Removed prices dependency to prevent UI distortion
+  }, [user, viewMode]); // Load balances directly, currencies will be extracted from response
+  
+  // Listen for currency change events from websocket
+  useEffect(() => {
+    const handleCurrencyChange = (data: any) => {
+      console.log('Currency change received in wallet:', data);
+      // Refresh balances when admin makes currency changes
+      loadBalances();
+    };
+    
+    // Use websocket client's currency change handler
+    const unsubscribe = websocketClient.onCurrencyChange(handleCurrencyChange);
+    
+    return unsubscribe;
+  }, []);
 
   if (isLoadingBalances || !user) {
     return (
@@ -313,13 +355,21 @@ export default function WalletPage() {
               My Assets
             </h1>
             <div className="flex items-center gap-4">
+              <Button 
+                onClick={() => router.push('/dashboard/deposit')}
+                className={`font-medium px-6 transition-colors ${
+                  theme === 'dark'
+                    ? 'bg-[#F0B90B] hover:bg-[#F0B90B]/90 text-black'
+                    : 'bg-blue-600 hover:bg-blue-700 text-white'
+                }`}
+              >
+                Deposit
+              </Button>
               <Dialog open={showDepositDialog} onOpenChange={setShowDepositDialog}>
                 <DialogTrigger asChild>
-                  <Button className={`font-medium px-6 transition-colors ${
-                    theme === 'dark'
-                      ? 'bg-[#F0B90B] hover:bg-[#F0B90B]/90 text-black'
-                      : 'bg-blue-600 hover:bg-blue-700 text-white'
-                  }`}>Deposit</Button>
+                  <Button variant="outline" className="font-medium px-6">
+                    Legacy Deposit
+                  </Button>
                 </DialogTrigger>
                 <DialogContent className={`max-w-md ${
                   theme === 'dark' ? 'bg-[#1E2329] border-[#2B3139]' : 'bg-white border-gray-200'
@@ -334,7 +384,7 @@ export default function WalletPage() {
                   </DialogHeader>
                   <div className="space-y-4">
                     <div>
-                      <label className={`block text-sm font-medium mb-2 ${
+                      <label className={`block text-xs font-medium mb-2 ${
                         theme === 'dark' ? 'text-white' : 'text-gray-900'
                       }`}>
                         Select Cryptocurrency
@@ -348,7 +398,7 @@ export default function WalletPage() {
                             : 'bg-gray-50 border-gray-300 text-gray-900 focus:border-blue-500'
                         }`}
                       >
-                        {supportedCryptos.map((crypto) => (
+                        {enabledCurrencies.map((crypto) => (
                           <option key={crypto.symbol} value={crypto.symbol}>
                             {crypto.name} ({crypto.symbol})
                           </option>
@@ -361,12 +411,12 @@ export default function WalletPage() {
                       return selectedBalance?.address && (
                         <div className="space-y-3">
                           <div>
-                            <label className={`block text-sm font-medium mb-2 ${
+                            <label className={`block text-xs font-medium mb-2 ${
                               theme === 'dark' ? 'text-white' : 'text-gray-900'
                             }`}>
                               Deposit Address
                             </label>
-                            <div className={`p-3 rounded-md border break-all text-sm ${
+                            <div className={`p-3 rounded-md border break-all text-xs ${
                               theme === 'dark'
                                 ? 'bg-[#2B3139] border-[#2B3139] text-white'
                                 : 'bg-gray-50 border-gray-300 text-gray-900'
@@ -390,12 +440,12 @@ export default function WalletPage() {
                           
                           {selectedBalance.memo && (
                             <div>
-                              <label className={`block text-sm font-medium mb-2 ${
+                              <label className={`block text-xs font-medium mb-2 ${
                                 theme === 'dark' ? 'text-white' : 'text-gray-900'
                               }`}>
                                 Memo/Tag
                               </label>
-                              <div className={`p-3 rounded-md border break-all text-sm ${
+                              <div className={`p-3 rounded-md border break-all text-xs ${
                                 theme === 'dark'
                                   ? 'bg-[#2B3139] border-[#2B3139] text-white'
                                   : 'bg-gray-50 border-gray-300 text-gray-900'
@@ -475,7 +525,7 @@ export default function WalletPage() {
                   </DialogHeader>
                   <div className="space-y-4">
                     <div>
-                      <label className={`block text-sm font-medium mb-2 ${
+                      <label className={`block text-xs font-medium mb-2 ${
                         theme === 'dark' ? 'text-white' : 'text-gray-900'
                       }`}>
                         Select Cryptocurrency
@@ -489,7 +539,7 @@ export default function WalletPage() {
                             : 'bg-gray-50 border-gray-300 text-gray-900 focus:border-blue-500'
                         }`}
                       >
-                        {supportedCryptos.map((crypto) => {
+                        {enabledCurrencies.map((crypto) => {
                           const balance = balances.find(b => b.symbol === crypto.symbol);
                           return (
                             <option key={crypto.symbol} value={crypto.symbol}>
@@ -501,7 +551,7 @@ export default function WalletPage() {
                     </div>
                     
                     <div>
-                      <label className={`block text-sm font-medium mb-2 ${
+                      <label className={`block text-xs font-medium mb-2 ${
                         theme === 'dark' ? 'text-white' : 'text-gray-900'
                       }`}>
                         Withdrawal Address
@@ -519,7 +569,7 @@ export default function WalletPage() {
                     </div>
                     
                     <div>
-                      <label className={`block text-sm font-medium mb-2 ${
+                      <label className={`block text-xs font-medium mb-2 ${
                         theme === 'dark' ? 'text-white' : 'text-gray-900'
                       }`}>
                         Amount
@@ -540,7 +590,7 @@ export default function WalletPage() {
                       {(() => {
                         const balance = balances.find(b => b.symbol === selectedCrypto);
                         return balance && (
-                          <p className={`text-sm mt-1 ${
+                          <p className={`text-xs mt-1 ${
                             theme === 'dark' ? 'text-[#848E9C]' : 'text-gray-500'
                           }`}>
                             Available: {formatNumber(balance.balance, 6)} {selectedCrypto}
@@ -582,7 +632,7 @@ export default function WalletPage() {
           </div>
           <div className="flex items-center gap-6">
             <div className="text-right">
-              <div className={`text-sm mb-1 ${
+              <div className={`text-xs mb-1 ${
                 theme === 'dark' ? 'text-[#B7BDC6]' : 'text-gray-700'
               }`}>Estimated Balance</div>
               <div className={`text-2xl font-bold mb-2 transition-all duration-500 ${
@@ -591,14 +641,13 @@ export default function WalletPage() {
                 <span className="tabular-nums">
                   {showBalances ? formatUGX(totalValueUGX) : "••••••••••"}
                 </span>
-                <span className={`text-sm ml-2 ${
+                <span className={`text-xs ml-2 ${
                   theme === 'dark' ? 'text-[#B7BDC6]' : 'text-gray-700'
                 }`}>UGX</span>
               </div>
               <PnLDisplay theme={theme} />
             </div>
             <div className="flex items-center gap-2">
-              <NotificationCenter />
               <Button
                 variant="ghost"
                 size="sm"
@@ -633,42 +682,29 @@ export default function WalletPage() {
               }`}>
                 <button 
                   onClick={() => setViewMode('coin')}
-                  className={`px-4 py-2 text-sm font-medium rounded-l-md border-b-2 transition-colors ${
+                  className={`px-4 py-2 text-xs font-medium rounded-l-md border-b-2 transition-colors ${
                     viewMode === 'coin'
                       ? (theme === 'dark'
                           ? 'text-[#F0B90B] bg-[#2B3139] border-[#F0B90B]'
                           : 'text-blue-600 bg-gray-100 border-blue-600')
                       : (theme === 'dark'
-                          ? 'text-[#B7BDC6] hover:text-white bg-transparent border-transparent'
-                          : 'text-gray-600 hover:text-gray-900 bg-transparent border-transparent')
+                          ? 'text-[#B7BDC6] bg-transparent border-transparent hover:text-white hover:bg-[#2B3139]'
+                          : 'text-gray-600 bg-transparent border-transparent hover:text-gray-900 hover:bg-gray-100')
                   }`}>
                   Coin View
                 </button>
                 <button 
-                  onClick={() => setViewMode('wallet')}
-                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                    viewMode === 'wallet'
-                      ? (theme === 'dark'
-                          ? 'text-[#F0B90B] bg-[#2B3139] border-[#F0B90B]'
-                          : 'text-blue-600 bg-gray-100 border-blue-600')
-                      : (theme === 'dark'
-                          ? 'text-[#B7BDC6] hover:text-white bg-transparent border-transparent'
-                          : 'text-gray-600 hover:text-gray-900 bg-transparent border-transparent')
-                  }`}>
-                  Multi-Chain
-                </button>
-                <button 
                   onClick={() => setViewMode('enhanced')}
-                  className={`px-4 py-2 text-sm font-medium rounded-r-md border-b-2 transition-colors ${
+                  className={`px-4 py-2 text-xs font-medium rounded-r-md border-b-2 transition-colors ${
                     viewMode === 'enhanced'
                       ? (theme === 'dark'
                           ? 'text-[#F0B90B] bg-[#2B3139] border-[#F0B90B]'
                           : 'text-blue-600 bg-gray-100 border-blue-600')
                       : (theme === 'dark'
-                          ? 'text-[#B7BDC6] hover:text-white bg-transparent border-transparent'
-                          : 'text-gray-600 hover:text-gray-900 bg-transparent border-transparent')
+                          ? 'text-[#B7BDC6] bg-transparent border-transparent hover:text-white hover:bg-[#2B3139]'
+                          : 'text-gray-600 bg-transparent border-transparent hover:text-gray-900 hover:bg-gray-100')
                   }`}>
-                  Enhanced
+                  Enhanced View
                 </button>
               </div>
             </div>
@@ -687,7 +723,7 @@ export default function WalletPage() {
                 />
                 <Search className="w-4 h-4 text-[#B7BDC6] absolute right-3 top-1/2 transform -translate-y-1/2" />
               </div>
-              <button className={`text-sm font-medium transition-colors ${
+              <button className={`text-xs font-medium transition-colors ${
                 theme === 'dark'
                   ? 'text-[#F0B90B] hover:text-[#F0B90B]/80'
                   : 'text-blue-600 hover:text-blue-700'
@@ -739,7 +775,7 @@ export default function WalletPage() {
                         <div className={`p-4 rounded-lg ${
                           theme === 'dark' ? 'bg-[#1E2329]' : 'bg-white'
                         }`}>
-                          <div className={`text-sm ${
+                          <div className={`text-xs ${
                             theme === 'dark' ? 'text-[#B7BDC6]' : 'text-gray-600'
                           }`}>
                             Total Currencies
@@ -754,7 +790,7 @@ export default function WalletPage() {
                         <div className={`p-4 rounded-lg ${
                           theme === 'dark' ? 'bg-[#1E2329]' : 'bg-white'
                         }`}>
-                          <div className={`text-sm ${
+                          <div className={`text-xs ${
                             theme === 'dark' ? 'text-[#B7BDC6]' : 'text-gray-600'
                           }`}>
                             Multi-Chain Tokens
@@ -769,7 +805,7 @@ export default function WalletPage() {
                         <div className={`p-4 rounded-lg ${
                           theme === 'dark' ? 'bg-[#1E2329]' : 'bg-white'
                         }`}>
-                          <div className={`text-sm ${
+                          <div className={`text-xs ${
                             theme === 'dark' ? 'text-[#B7BDC6]' : 'text-gray-600'
                           }`}>
                             Total Value (USD)
@@ -788,16 +824,16 @@ export default function WalletPage() {
                 <table className="w-full">
                   <thead className={theme === 'dark' ? 'bg-[#2B3139]' : 'bg-gray-50'}>
                     <tr>
-                      <th className={`text-left py-4 px-6 text-sm font-medium ${
+                      <th className={`text-left py-4 px-6 text-xs font-medium ${
                         theme === 'dark' ? 'text-[#B7BDC6]' : 'text-gray-600'
                       }`}>Coin</th>
-                      <th className={`text-right py-4 px-6 text-sm font-medium ${
+                      <th className={`text-right py-4 px-6 text-xs font-medium ${
                         theme === 'dark' ? 'text-[#B7BDC6]' : 'text-gray-600'
                       }`}>Amount</th>
-                      <th className={`text-right py-4 px-6 text-sm font-medium ${
+                      <th className={`text-right py-4 px-6 text-xs font-medium ${
                         theme === 'dark' ? 'text-[#B7BDC6]' : 'text-gray-600'
                       }`}>Coin Price</th>
-                      <th className={`text-right py-4 px-6 text-sm font-medium ${
+                      <th className={`text-right py-4 px-6 text-xs font-medium ${
                         theme === 'dark' ? 'text-[#B7BDC6]' : 'text-gray-600'
                       }`}>Action</th>
                     </tr>
@@ -851,7 +887,7 @@ export default function WalletPage() {
                               <div className={`font-semibold ${
                                 theme === 'dark' ? 'text-white' : 'text-gray-900'
                               }`}>{supportedCryptos.find(c => c.symbol === asset.symbol)?.name || asset.symbol}</div>
-                              <div className={`text-sm flex items-center gap-2 ${
+                              <div className={`text-xs flex items-center gap-2 ${
                                 theme === 'dark' ? 'text-[#B7BDC6]' : 'text-gray-600'
                               }`}>
                                 {asset.symbol}
@@ -908,7 +944,7 @@ export default function WalletPage() {
                         <td className="py-4 px-6 text-right">
                           <div className="relative">
                             <select 
-                              className={`rounded text-sm px-3 py-1 focus:outline-none appearance-none cursor-pointer min-w-[100px] transition-colors ${
+                              className={`rounded text-xs px-3 py-1 focus:outline-none appearance-none cursor-pointer min-w-[100px] transition-colors ${
                                 theme === 'dark'
                                   ? 'bg-[#2B3139] border border-[#2B3139] text-white focus:border-[#F0B90B]'
                                   : 'bg-gray-50 border border-gray-300 text-gray-900 focus:border-blue-500'
@@ -917,8 +953,7 @@ export default function WalletPage() {
                               onChange={(e) => {
                                 const action = e.target.value;
                                 if (action === 'Deposit') {
-                                  setSelectedCrypto(asset.symbol);
-                                  setShowDepositDialog(true);
+                                  router.push(`/dashboard/deposit?crypto=${asset.symbol}`);
                                 } else if (action === 'Withdraw') {
                                   setSelectedCrypto(asset.symbol);
                                   setShowWithdrawDialog(true);
@@ -982,7 +1017,7 @@ export default function WalletPage() {
                                   }`}>
                                     {hasAddress ? 'Main Wallet' : 'Pending Setup'}
                                   </div>
-                                  <div className={`text-sm ${
+                                  <div className={`text-xs ${
                                     theme === 'dark' ? 'text-[#B7BDC6]' : 'text-gray-600'
                                   }`}>
                                     {hasAddress 
@@ -998,7 +1033,7 @@ export default function WalletPage() {
                                 }`}>
                                   {showBalances ? formatUGX(totalWalletValue) : '••••••'}
                                 </div>
-                                <div className={`text-sm ${
+                                <div className={`text-xs ${
                                   theme === 'dark' ? 'text-[#B7BDC6]' : 'text-gray-600'
                                 }`}>
                                   {walletBalances.length} assets
@@ -1046,7 +1081,7 @@ export default function WalletPage() {
                                         )}
                                       </div>
                                       <div>
-                                        <div className={`font-medium text-sm ${
+                                        <div className={`font-medium text-xs ${
                                           theme === 'dark' ? 'text-white' : 'text-gray-900'
                                         }`}>
                                           {supportedCryptos.find(c => c.symbol === asset.symbol)?.name || asset.symbol}
@@ -1059,7 +1094,7 @@ export default function WalletPage() {
                                       </div>
                                     </div>
                                     <div className="text-right">
-                                      <div className={`font-medium text-sm ${
+                                      <div className={`font-medium text-xs ${
                                         theme === 'dark' ? 'text-white' : 'text-gray-900'
                                       }`}>
                                         {showBalances ? `$${formatNumber(asset.balance_usd, 2)}` : '••••••'}
@@ -1101,7 +1136,7 @@ export default function WalletPage() {
             }`}>Recent Transactions</h2>
             <button 
               onClick={() => router.push('/dashboard/transactions')}
-              className={`text-sm font-medium transition-colors ${
+              className={`text-xs font-medium transition-colors ${
                 theme === 'dark'
                   ? 'text-[#F0B90B] hover:text-[#F0B90B]/80'
                   : 'text-blue-600 hover:text-blue-700'
@@ -1117,16 +1152,16 @@ export default function WalletPage() {
                   <tr className={`border-b ${
                     theme === 'dark' ? 'border-[#2B3139]' : 'border-gray-200'
                   }`}>
-                    <th className={`text-left py-3 px-4 text-sm font-medium ${
+                    <th className={`text-left py-3 px-4 text-xs font-medium ${
                       theme === 'dark' ? 'text-[#848E9C]' : 'text-gray-500'
                     }`}>Transactions</th>
-                    <th className={`text-right py-3 px-4 text-sm font-medium ${
+                    <th className={`text-right py-3 px-4 text-xs font-medium ${
                       theme === 'dark' ? 'text-[#848E9C]' : 'text-gray-500'
                     }`}>Amount</th>
-                    <th className={`text-right py-3 px-4 text-sm font-medium ${
+                    <th className={`text-right py-3 px-4 text-xs font-medium ${
                       theme === 'dark' ? 'text-[#848E9C]' : 'text-gray-500'
                     }`}>Date</th>
-                    <th className={`text-right py-3 px-4 text-sm font-medium ${
+                    <th className={`text-right py-3 px-4 text-xs font-medium ${
                       theme === 'dark' ? 'text-[#848E9C]' : 'text-gray-500'
                     }`}>Status</th>
                   </tr>
@@ -1137,7 +1172,7 @@ export default function WalletPage() {
                       <td colSpan={4} className="py-8 text-center">
                         <div className="flex items-center justify-center gap-2">
                           <Loader2 className="w-4 h-4 animate-spin" />
-                          <span className={`text-sm ${
+                          <span className={`text-xs ${
                             theme === 'dark' ? 'text-[#848E9C]' : 'text-gray-500'
                           }`}>Loading transactions...</span>
                         </div>
@@ -1146,33 +1181,83 @@ export default function WalletPage() {
                   ) : recentTransactions.length === 0 ? (
                     <tr>
                       <td colSpan={4} className="py-8 text-center">
-                        <div className={`text-sm ${
+                        <div className={`text-xs ${
                           theme === 'dark' ? 'text-[#848E9C]' : 'text-gray-500'
                         }`}>No recent transactions</div>
                       </td>
                     </tr>
                   ) : (
                     recentTransactions.map((transaction) => {
+                      const isBuy = transaction.type?.toLowerCase() === 'buy_crypto';
+                      const isSell = transaction.type?.toLowerCase() === 'sell_crypto';
                       const isDeposit = transaction.type?.toLowerCase() === 'deposit';
                       const isWithdrawal = transaction.type?.toLowerCase() === 'withdrawal';
                       const currency = transaction.metadata_json?.currency || transaction.currency || 'UGX';
                       
-                      // Get the correct amount based on currency type
-                      let amount = transaction.amount || 0;
-                      if (transaction.metadata_json) {
-                        switch (currency.toUpperCase()) {
-                          case 'ETH':
-                            amount = parseFloat(transaction.metadata_json.amount_eth || transaction.amount || 0);
-                            break;
-                          case 'TRX':
-                            amount = parseFloat(transaction.metadata_json.amount_trx || transaction.amount || 0);
-                            break;
-                          case 'BTC':
-                            amount = parseFloat(transaction.metadata_json.amount_btc || transaction.amount || 0);
-                            break;
-                          default:
-                            amount = parseFloat(transaction.amount || 0);
+                      // Debug transaction data
+                      console.log('Transaction data:', transaction);
+                      
+                      // For buy/sell transactions, extract crypto amount from description
+                      let displayAmount = '';
+                      let displayCurrency = currency;
+                      
+                      if (isBuy) {
+                        // First try to use formatted_amount from backend
+                        if (transaction.formatted_amount && transaction.formatted_amount !== '0' && !transaction.formatted_amount.startsWith('0.00000000')) {
+                          displayAmount = transaction.formatted_amount;
+                          // Extract currency from formatted amount if possible
+                          const currencyMatch = transaction.formatted_amount.match(/([A-Z]{3,4})$/);
+                          if (currencyMatch) {
+                            displayCurrency = currencyMatch[1];
+                            displayAmount = transaction.formatted_amount.replace(/\s*[A-Z]{3,4}$/, '');
+                          }
+                        } else if (transaction.description) {
+                          // Extract crypto amount from description like "Bought 0.00000143 BTC for 1,000 UGX"
+                          const match = transaction.description.match(/Bought\s+([\d.,]+)\s+([A-Z]+)/);
+                          if (match) {
+                            displayAmount = match[1];
+                            displayCurrency = match[2];
+                          }
                         }
+                        
+                        // Final fallback for buy transactions
+                        if (!displayAmount || displayAmount === '0' || displayAmount.startsWith('0.00000000')) {
+                          if (transaction.amount_smallest_unit && transaction.currency) {
+                            const decimals = transaction.currency === 'BTC' ? 8 : transaction.currency === 'ETH' ? 18 : 6;
+                            displayAmount = formatNumber(transaction.amount_smallest_unit / Math.pow(10, decimals), transaction.currency === 'BTC' ? 8 : 6);
+                            displayCurrency = transaction.currency;
+                          } else {
+                            displayAmount = formatNumber(transaction.amount || 0, currency === 'BTC' ? 8 : 6);
+                          }
+                        }
+                      } else if (transaction.formatted_amount) {
+                        // Extract currency from formatted amount if it contains one
+                        const currencyMatch = transaction.formatted_amount.match(/([A-Z]{3,4})$/);
+                        if (currencyMatch) {
+                          displayCurrency = currencyMatch[1];
+                          displayAmount = transaction.formatted_amount.replace(/\s*[A-Z]{3,4}$/, '');
+                        } else {
+                          displayAmount = transaction.formatted_amount;
+                        }
+                      } else {
+                        // Fallback logic for other transaction types
+                        let amount = transaction.amount || 0;
+                        if (transaction.metadata_json) {
+                          switch (currency.toUpperCase()) {
+                            case 'ETH':
+                              amount = parseFloat(transaction.metadata_json.amount_eth || transaction.amount || 0);
+                              break;
+                            case 'TRX':
+                              amount = parseFloat(transaction.metadata_json.amount_trx || transaction.amount || 0);
+                              break;
+                            case 'BTC':
+                              amount = parseFloat(transaction.metadata_json.amount_btc || transaction.amount || 0);
+                              break;
+                            default:
+                              amount = parseFloat(transaction.amount || 0);
+                          }
+                        }
+                        displayAmount = formatNumber(amount, currency === 'BTC' ? 8 : 6);
                       }
                       
                       const date = new Date(transaction.created_at);
@@ -1206,11 +1291,11 @@ export default function WalletPage() {
                           <td className="py-3 px-4">
                             <div className="flex items-center gap-3">
                               <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                                isDeposit ? 'bg-green-500/20' : isWithdrawal ? 'bg-red-500/20' : 'bg-blue-500/20'
+                                isDeposit || isBuy ? 'bg-green-500/20' : isWithdrawal || isSell ? 'bg-red-500/20' : 'bg-blue-500/20'
                               }`}>
-                                {isDeposit ? (
+                                {isDeposit || isBuy ? (
                                   <ArrowDownToLine className="w-4 h-4 text-green-500" />
-                                ) : isWithdrawal ? (
+                                ) : isWithdrawal || isSell ? (
                                   <ArrowUpFromLine className="w-4 h-4 text-red-500" />
                                 ) : (
                                   <RefreshCw className="w-4 h-4 text-blue-500" />
@@ -1220,25 +1305,33 @@ export default function WalletPage() {
                                 <div className={`font-medium ${
                                   theme === 'dark' ? 'text-white' : 'text-gray-900'
                                 }`}>
-                                  {transaction.type?.charAt(0).toUpperCase() + transaction.type?.slice(1).toLowerCase() || 'Transaction'} {currency}
+                                  {isBuy ? `Buy ${displayCurrency}` : 
+                                   isSell ? `Sell ${displayCurrency}` :
+                                   isDeposit ? `Deposit ${displayCurrency}` :
+                                   isWithdrawal ? `Withdraw ${displayCurrency}` :
+                                   `${transaction.type?.charAt(0).toUpperCase() + transaction.type?.slice(1).toLowerCase() || 'Transaction'} ${displayCurrency}`}
                                 </div>
-                                <div className={`text-sm ${
+                                <div className={`text-xs ${
                                   theme === 'dark' ? 'text-[#848E9C]' : 'text-gray-500'
                                 }`}>
-                                  {transaction.description || (isDeposit ? 'From External Wallet' : isWithdrawal ? 'To External Wallet' : 'Transaction')}
+                                  {transaction.description || 
+                                   (isBuy ? `Purchased ${displayCurrency}` :
+                                    isSell ? `Sold ${displayCurrency}` :
+                                    isDeposit ? 'From External Wallet' : 
+                                    isWithdrawal ? 'To External Wallet' : 'Transaction')}
                                 </div>
                               </div>
                             </div>
                           </td>
                           <td className="py-3 px-4 text-right">
                             <div className={`font-medium tabular-nums transition-all duration-300 ${
-                              isDeposit ? 'text-green-500' : isWithdrawal ? 'text-red-500' : theme === 'dark' ? 'text-white' : 'text-gray-900'
+                              isDeposit || isBuy ? 'text-green-500' : isWithdrawal || isSell ? 'text-red-500' : theme === 'dark' ? 'text-white' : 'text-gray-900'
                             }`}>
-                              {isDeposit ? '+' : isWithdrawal ? '-' : ''}{formatCryptoAmount(amount, currency)} {currency}
+                              {isDeposit || isBuy ? '+' : isWithdrawal || isSell ? '-' : ''}{displayAmount} {displayCurrency}
                             </div>
                           </td>
                           <td className="py-3 px-4 text-right">
-                            <div className={`text-sm ${
+                            <div className={`text-xs ${
                               theme === 'dark' ? 'text-[#848E9C]' : 'text-gray-500'
                             }`}>
                               {date.toLocaleString('en-CA', {
@@ -1265,6 +1358,14 @@ export default function WalletPage() {
             </div>
           </div>
         </div>
+
+        {/* Multi-Network Deposit Dialog for USDT */}
+        <MultiNetworkDeposit
+          isOpen={showMultiNetworkDeposit}
+          onClose={() => setShowMultiNetworkDeposit(false)}
+          tokenSymbol="USDT"
+          tokenName="Tether"
+        />
       </div>
     </div>
   );

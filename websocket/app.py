@@ -139,7 +139,7 @@ def redis_listener(socketio):
             logger.info("BOOT: Redis connection established successfully")
             
             pubsub = r.pubsub()
-            pubsub.subscribe('transaction_updates')
+            pubsub.subscribe('transaction_updates', 'trade_updates', 'currency_updates')
             
             logger.info("BOOT: Redis pubsub listener started successfully")
             
@@ -149,8 +149,53 @@ def redis_listener(socketio):
                     if message['type'] == 'message':
                         try:
                             data = json.loads(message['data'])
-                            transaction_id = data.get('transaction_id')
-                            socketio.emit('tx_update', data, to=transaction_id)
+                            channel = message['channel'].decode('utf-8') if isinstance(message['channel'], bytes) else message['channel']
+                            
+                            if channel == 'transaction_updates':
+                                logger.info(f"🔔 RECEIVED transaction update from Redis: {data}")
+                                socketio.emit('transaction_update', data, namespace='/')
+                            elif channel == 'trade_updates':
+                                socketio.emit('trade_update', data, namespace='/')
+                            elif channel == 'currency_updates':
+                                # Handle currency change notifications
+                                if data.get('type') == 'currency_change':
+                                    # Force refresh crypto price service currencies
+                                    if crypto_price_service:
+                                        crypto_price_service.load_enabled_currencies()
+                                    # Broadcast to all connected clients
+                                    socketio.emit('currency_change', data, namespace='/')
+                                    logger.info(f"Broadcasted currency change: {data}")
+                                trade_id = data.get('trade_id')
+                                if trade_id:
+                                    trade_room = f"trade_{trade_id}"
+                                    
+                                    # Check if there are any clients in the trade room
+                                    try:
+                                        room_clients = socketio.server.manager.get_participants('/', trade_room)
+                                        client_count = len(room_clients) if room_clients else 0
+                                        logger.info(f"🔔 Clients in room '{trade_room}': {client_count}")
+                                        
+                                        if client_count > 0:
+                                            logger.info(f"🔔 Client SIDs in room: {list(room_clients) if room_clients else []}")
+                                        
+                                        # Emit to the trade room
+                                        socketio.emit('trade_status_update', data, room=trade_room)
+                                        logger.info(f"✅ BROADCASTED trade update to room '{trade_room}' via Redis (to {client_count} clients)")
+                                        
+                                        # Also emit to all connected clients for debugging
+                                        socketio.emit('debug_trade_update', {
+                                            'message': f'Trade {trade_id} update broadcasted',
+                                            'room': trade_room,
+                                            'clients_in_room': client_count,
+                                            'data': data
+                                        })
+                                        logger.info(f"🔔 BROADCASTED debug message to all clients")
+                                        
+                                    except Exception as room_error:
+                                        logger.error(f"Error checking room participants: {room_error}")
+                                        # Still try to emit even if we can't check participants
+                                        socketio.emit('trade_status_update', data, room=trade_room)
+                                        logger.info(f"✅ BROADCASTED trade update to room '{trade_room}' (fallback)")
                         except Exception as e:
                             logger.error(f"Error processing redis pubsub message: {e!r}")
                         finally:
@@ -232,7 +277,7 @@ except Exception as e:
     logger.info("BOOT: Continuing without Kafka functionality")
     admin_client = None
 
-# Initialize crypto price service
+# Initialize crypto price service (global reference for currency updates)
 crypto_price_service = None
 try:
     logger.info("BOOT: Initializing real crypto price service...")
@@ -385,18 +430,82 @@ def handle_leave_trading():
     leave_room('trading')
     emit('left_trading', {'message': 'Left trading room'})
 
+@socketio.on('join_trade')
+def handle_join_trade(data):
+    """Join specific trade room for real-time updates"""
+    try:
+        trade_id = data.get('trade_id')
+        if not trade_id:
+            logger.warning(f"🔔 Client {request.sid} attempted to join trade room without trade_id")
+            emit('error', {'message': 'Trade ID required'})
+            return
+        
+        trade_room = f"trade_{trade_id}"
+        join_room(trade_room)
+        logger.info(f"🔔 Client {request.sid} JOINED trade room: {trade_room}")
+        emit('joined_trade', {'message': f'Joined trade {trade_id} room', 'trade_id': trade_id})
+        
+    except Exception as e:
+        logger.error(f"💥 ERROR joining trade room for client {request.sid}: {e}")
+        emit('error', {'message': 'Failed to join trade room'})
+
+@socketio.on('leave_trade')
+def handle_leave_trade(data):
+    """Leave specific trade room"""
+    try:
+        trade_id = data.get('trade_id')
+        if trade_id:
+            trade_room = f"trade_{trade_id}"
+            leave_room(trade_room)
+            logger.info(f"🔔 Client {request.sid} LEFT trade room: {trade_room}")
+            emit('left_trade', {'message': f'Left trade {trade_id} room', 'trade_id': trade_id})
+    except Exception as e:
+        logger.error(f"💥 ERROR leaving trade room for client {request.sid}: {e}")
+
 def broadcast_trade_update(trade_data):
-    """Broadcast trade update to all users in trading room"""
+    """Broadcast trade update to all users in trading room and specific trade room"""
     try:
         message = {
             'type': 'trade_update',
             'data': trade_data,
             'timestamp': datetime.utcnow().isoformat()
         }
+        # Broadcast to general trading room
         socketio.emit('trade_update', message, room='trading')
-        logger.info(f"Broadcasted trade update: {trade_data.get('id')}")
+        
+        # Also broadcast to specific trade room if trade_id exists
+        trade_id = trade_data.get('id') or trade_data.get('trade_id')
+        if trade_id:
+            trade_room = f"trade_{trade_id}"
+            socketio.emit('trade_status_update', message, room=trade_room)
+            logger.info(f"Broadcasted trade update to room {trade_room}")
+        
+        logger.info(f"Broadcasted trade update: {trade_id}")
     except Exception as e:
         logger.error(f"Error broadcasting trade update: {e}")
+
+def send_trade_status_update(trade_id, status_data):
+    """Send status update to specific trade room"""
+    try:
+        message = {
+            'type': 'trade_status_update',
+            'trade_id': trade_id,
+            'data': status_data,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        trade_room = f"trade_{trade_id}"
+        
+        logger.info(f"🔔 BROADCASTING trade status update to room '{trade_room}'")
+        logger.info(f"🔔 Message payload: {message}")
+        
+        # Check if there are any clients in the trade room
+        room_clients = socketio.server.manager.get_participants(socketio.server.manager.namespace, trade_room)
+        logger.info(f"🔔 Clients in room '{trade_room}': {len(room_clients) if room_clients else 0}")
+        
+        socketio.emit('trade_status_update', message, room=trade_room)
+        logger.info(f"✅ BROADCASTED trade status update to trade {trade_id} room '{trade_room}'")
+    except Exception as e:
+        logger.error(f"💥 ERROR broadcasting trade status update to trade {trade_id}: {e}")
 
 def send_user_notification(user_id, notification_data):
     """Send notification to specific user"""
@@ -451,6 +560,27 @@ def broadcast_trade():
         return jsonify({'success': True, 'message': 'Trade update broadcasted'})
     except Exception as e:
         logger.error(f"Error broadcasting trade: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/websocket/trade/<int:trade_id>/status', methods=['POST'])
+def update_trade_status(trade_id):
+    """HTTP endpoint to send status update to specific trade"""
+    try:
+        data = request.get_json()
+        if not data:
+            logger.warning(f"🔔 RECEIVED empty data for trade {trade_id} status update")
+            return jsonify({'success': False, 'error': 'No data provided'}), 400
+        
+        logger.info(f"🔔 RECEIVED WebSocket notification request for trade {trade_id}")
+        logger.info(f"🔔 Request data: {data}")
+        logger.info(f"🔔 Request headers: {dict(request.headers)}")
+        
+        send_trade_status_update(trade_id, data)
+        
+        logger.info(f"✅ PROCESSED trade status update for trade {trade_id}")
+        return jsonify({'success': True, 'message': f'Status update sent to trade {trade_id}'})
+    except Exception as e:
+        logger.error(f"💥 ERROR processing trade status update for trade {trade_id}: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/websocket/notify/user/<int:user_id>', methods=['POST'])
@@ -586,7 +716,7 @@ if __name__ == '__main__':
         # socketio.start_background_task(target=lambda: notification_handler.start_consumer())
         # logger.info("BOOT: Notification handler will start in background")
         
-        socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+        socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False)
     except Exception as e:
         logger.error(f"BOOT: Failed to start server: {e}")
         sys.exit(1)

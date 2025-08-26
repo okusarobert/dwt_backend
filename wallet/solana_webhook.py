@@ -321,8 +321,8 @@ def handle_solana_address_activity(webhook_data: dict):
                         for i in range(min(len(account_keys), len(pre_balances), len(post_balances))):
                             balance_change = int(post_balances[i]) - int(pre_balances[i])
                             
-                            # Skip system accounts (balance = 1) and fee payer analysis
-                            if pre_balances[i] <= 1:
+                            # Skip system accounts that maintain balance = 1 (unchanged system accounts)
+                            if pre_balances[i] == 1 and post_balances[i] == 1:
                                 continue
                                 
                             if balance_change > 0:
@@ -461,7 +461,8 @@ def handle_solana_address_activity(webhook_data: dict):
                                 amount=amount_sol,
                                 wallet_address=to_address,
                                 slot=webhook_data.get('event', {}).get('slot'),
-                                confirmations=1
+                                confirmations=1,
+                                transaction_id=transaction.id
                             )
                             logger.info(f"🔔 SOL notification result: {result}")
                         except Exception as e:
@@ -469,6 +470,22 @@ def handle_solana_address_activity(webhook_data: dict):
 
                     # Attempt to update confirmations and credit if finalized
                     _update_tx_confirmations_and_credit(tx_hash, required_confirmations=32, network=webhook_data.get('event', {}).get('network'))
+                    
+                    # Trigger immediate sweep after deposit confirmation
+                    try:
+                        from wallet.crypto_sweeper_service import CryptoSweeperService
+                        sweeper = CryptoSweeperService()
+                        sweep_success = sweeper.sweep_address_on_deposit(
+                            address=to_address,
+                            currency='SOL',
+                            transaction_hash=tx_hash
+                        )
+                        if sweep_success:
+                            logger.info(f"🧹 Successfully triggered sweep for SOL deposit {tx_hash}")
+                        else:
+                            logger.warning(f"🧹 Sweep not triggered for SOL deposit {tx_hash}")
+                    except Exception as sweep_error:
+                        logger.error(f"❌ Error triggering sweep for SOL deposit {tx_hash}: {sweep_error}")
 
                 except Exception as e:
                     session.rollback()

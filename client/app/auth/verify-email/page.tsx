@@ -74,7 +74,7 @@ function VerifyEmailContent() {
       toast.success("Email verified successfully!");
       localStorage.removeItem("signup_email");
       // User is already authenticated, redirect to dashboard
-      router.push("/dashboard");
+      window.location.href = "/dashboard";
     } catch (error: any) {
       console.error("Verification error:", error);
       const message = error.response?.data?.message || "Invalid verification code";
@@ -93,7 +93,6 @@ function VerifyEmailContent() {
       toast.success("Verification code sent successfully!");
       setCountdown(30);
     } catch (error: any) {
-      console.error("Resend error:", error);
       const message = error.response?.data?.message || "Failed to resend code";
       toast.error(message);
     } finally {

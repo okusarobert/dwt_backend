@@ -121,6 +121,30 @@ def trading_calculate():
         app.logger.error(f"Error in trading calculate proxy: {e}")
         return jsonify({"error": "Failed to calculate trade"}), 500
 
+@api.route('/trading/quote', methods=['POST', 'OPTIONS'])
+def trading_quote():
+    """Proxy trading quote endpoint"""
+    # Handle CORS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        headers = {"Content-Type": "application/json", "Accept": "*/*"}
+        if 'Authorization' in request.headers:
+            headers['Authorization'] = request.headers['Authorization']
+        
+        # Forward cookies for authentication
+        cookies = request.cookies
+        
+        data = request.get_json()
+        res = requests.post(f"{TRADING_SERVICE_URL}/api/trading/quote", 
+                           json=data, headers=headers, cookies=cookies)
+        return jsonify(res.json()), res.status_code
+        
+    except Exception as e:
+        app.logger.error(f"Error in trading quote proxy: {e}")
+        return jsonify({"error": "Failed to get quote"}), 500
+
 @api.route('/trading/buy', methods=['POST', 'OPTIONS'])
 def trading_buy():
     """Proxy trading buy endpoint"""
@@ -182,8 +206,10 @@ def trading_trades():
         url = f"{TRADING_SERVICE_URL}/api/trading/trades"
         if query_string:
             url += f"?{query_string}"
+        # Forward cookies for authentication
+        cookies = request.cookies
         
-        res = requests.get(url, headers=headers)
+        res = requests.get(url, headers=headers, cookies=cookies)
         return jsonify(res.json()), res.status_code
         
     except Exception as e:
@@ -198,8 +224,11 @@ def trading_trade_details(trade_id):
         if 'Authorization' in request.headers:
             headers['Authorization'] = request.headers['Authorization']
         
+        # Forward cookies for authentication
+        cookies = request.cookies
+        
         res = requests.get(f"{TRADING_SERVICE_URL}/api/trading/trades/{trade_id}", 
-                          headers=headers)
+                          headers=headers, cookies=cookies)
         return jsonify(res.json()), res.status_code
         
     except Exception as e:
@@ -214,8 +243,11 @@ def trading_cancel_trade(trade_id):
         if 'Authorization' in request.headers:
             headers['Authorization'] = request.headers['Authorization']
         
+        # Forward cookies for authentication
+        cookies = request.cookies
+        
         res = requests.post(f"{TRADING_SERVICE_URL}/api/trading/trades/{trade_id}/cancel", 
-                           headers=headers)
+                           headers=headers, cookies=cookies)
         return jsonify(res.json()), res.status_code
         
     except Exception as e:
@@ -363,18 +395,69 @@ def relworx_webhook_proxy():
     """Proxy Relworx webhook"""
     try:
         headers = {"Content-Type": "application/json", "Accept": "*/*"}
-        # Forward webhook signature headers
-        if 'X-Relworx-Signature' in request.headers:
-            headers['X-Relworx-Signature'] = request.headers['X-Relworx-Signature']
         
-        data = request.get_json()
-        res = requests.post(f"{TRADING_SERVICE_URL}/api/webhooks/relworx", 
-                           json=data, headers=headers)
+        res = requests.post(f"{WALLET_SERVICE_URL}/webhooks/relworx", 
+                          json=request.get_json(), headers=headers)
+        
         return jsonify(res.json()), res.status_code
         
     except Exception as e:
         app.logger.error(f"Error in Relworx webhook proxy: {e}")
         return jsonify({"error": "Failed to process Relworx webhook"}), 500
+
+@api.route('/wallet/eth/callbacks/address-webhook', methods=['POST'])
+def ethereum_webhook_proxy():
+    """Proxy Ethereum address webhook"""
+    try:
+        headers = {"Content-Type": "application/json", "Accept": "*/*"}
+        
+        res = requests.post(f"{WALLET_SERVICE_URL}/wallet/eth/callbacks/address-webhook", 
+                          json=request.get_json(), headers=headers)
+        
+        return jsonify(res.json()), res.status_code
+        
+    except Exception as e:
+        app.logger.error(f"Error in Ethereum webhook proxy: {e}")
+        return jsonify({"error": "Failed to process Ethereum webhook"}), 500
+
+@api.route('/wallet/eth/callbacks/health', methods=['GET'])
+def ethereum_webhook_health_proxy():
+    """Proxy Ethereum webhook health check"""
+    try:
+        res = requests.get(f"{WALLET_SERVICE_URL}/api/v1/wallet/eth/callbacks/health")
+        
+        return jsonify(res.json()), res.status_code
+        
+    except Exception as e:
+        app.logger.error(f"Error in Ethereum webhook health proxy: {e}")
+        return jsonify({"error": "Failed to check Ethereum webhook health"}), 500
+
+@api.route('/wallet/bnb/callbacks/address-webhook', methods=['POST'])
+def bnb_webhook_proxy():
+    """Proxy BNB address webhook"""
+    try:
+        headers = {"Content-Type": "application/json", "Accept": "*/*"}
+        
+        res = requests.post(f"{WALLET_SERVICE_URL}/wallet/bnb/callbacks/address-webhook", 
+                          json=request.get_json(), headers=headers)
+        
+        return jsonify(res.json()), res.status_code
+        
+    except Exception as e:
+        app.logger.error(f"Error in BNB webhook proxy: {e}")
+        return jsonify({"error": "Failed to process BNB webhook"}), 500
+
+@api.route('/wallet/bnb/callbacks/health', methods=['GET'])
+def bnb_webhook_health_proxy():
+    """Proxy BNB webhook health check"""
+    try:
+        res = requests.get(f"{WALLET_SERVICE_URL}/api/v1/wallet/bnb/callbacks/health")
+        
+        return jsonify(res.json()), res.status_code
+        
+    except Exception as e:
+        app.logger.error(f"Error in BNB webhook health proxy: {e}")
+        return jsonify({"error": "Failed to check BNB webhook health"}), 500
 
 
 @api.route('/register', methods=['POST'])
@@ -630,6 +713,28 @@ def proxy_wallet_pnl():
     resp = requests.get(f"{WALLET_SERVICE_URL}/wallet/pnl",
                         headers=headers, cookies=cookies, params=request.args)
     return jsonify(resp.json()), resp.status_code
+
+@api.route('/verification-info', methods=['GET'])
+def verification_info():
+    """Proxy verification info endpoint to auth service"""
+    try:
+        headers = {"Authorization": request.headers.get("Authorization")}
+        cookies = request.cookies
+        app.logger.info(f"AUTH SERVICE URL: {AUTH_SERVICE_URL}")
+        resp = requests.get(f"{AUTH_SERVICE_URL}/api/verification-info", 
+                           headers=headers, cookies=cookies, timeout=10)
+        return jsonify(resp.json()), resp.status_code
+    except requests.exceptions.RequestException as e:
+        # Fallback if auth service unavailable
+        return jsonify({
+            "success": False,
+            "verification_status": None,
+            "verification_level": None,
+            "kyc_status": None, 
+            "documents_uploaded": False,
+            "phone_verified": False,
+            "email_verified": False
+        }), 401
 
 @api.route('/wallet/portfolio-summary', methods=['GET'])
 def proxy_wallet_portfolio_summary():
@@ -894,21 +999,114 @@ def admin_get_user_proxy(user_id):
 
 
 @api.route('/admin/users/<int:user_id>', methods=['PATCH'])
-def admin_update_user_proxy(user_id):
+def proxy_admin_update_user(user_id):
     """Proxy admin update user to admin service"""
-    try:
-        headers = {"Content-Type": "application/json", "Accept": "*/*"}
-        if 'Authorization' in request.headers:
-            headers['Authorization'] = request.headers['Authorization']
-        resp = requests.patch(
-            f"{ADMIN_SERVICE_URL}/admin/users/{user_id}",
-            json=request.get_json(silent=True) or {},
-            headers=headers,
-        )
-        return jsonify(resp.json()), resp.status_code
-    except Exception as e:
-        app.logger.error(f"Error proxying admin update user: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    if 'Authorization' in request.headers:
+        headers['Authorization'] = request.headers['Authorization']
+    resp = requests.patch(
+        f"{ADMIN_SERVICE_URL}/admin/users/{user_id}",
+        json=request.get_json(silent=True) or {},
+        headers=headers,
+    )
+    return jsonify(resp.json()), resp.status_code
+
+
+# --- ADMIN CURRENCY ROUTES ---
+@api.route('/admin/currencies', methods=['GET'])
+def proxy_admin_get_currencies():
+    headers = {'Content-Type': 'application/json'}
+    cookies = request.cookies
+    if 'Authorization' in request.headers:
+        headers['Authorization'] = request.headers['Authorization']
+    
+    resp = requests.get(
+        f"{ADMIN_SERVICE_URL}/admin/currencies",
+        headers=headers,
+        cookies=cookies,
+        params=request.args
+    )
+    return jsonify(resp.json()), resp.status_code
+
+
+@api.route('/admin/currencies', methods=['POST'])
+def proxy_admin_create_currency():
+    headers = {'Content-Type': 'application/json'}
+    cookies = request.cookies
+    if 'Authorization' in request.headers:
+        headers['Authorization'] = request.headers['Authorization']
+    
+    resp = requests.post(
+        f"{ADMIN_SERVICE_URL}/admin/currencies",
+        json=request.get_json(silent=True) or {},
+        headers=headers,
+        cookies=cookies
+    )
+    return jsonify(resp.json()), resp.status_code
+
+
+@api.route('/admin/currencies/<currency_id>', methods=['GET'])
+def proxy_admin_get_currency(currency_id):
+    headers = {'Content-Type': 'application/json'}
+    cookies = request.cookies
+    if 'Authorization' in request.headers:
+        headers['Authorization'] = request.headers['Authorization']
+    
+    resp = requests.get(
+        f"{ADMIN_SERVICE_URL}/admin/currencies/{currency_id}",
+        headers=headers,
+        cookies=cookies
+    )
+    return jsonify(resp.json()), resp.status_code
+
+
+@api.route('/admin/currencies/<currency_id>', methods=['PUT'])
+def proxy_admin_update_currency(currency_id):
+    headers = {'Content-Type': 'application/json'}
+    cookies = request.cookies
+    if 'Authorization' in request.headers:
+        headers['Authorization'] = request.headers['Authorization']
+    
+    resp = requests.put(
+        f"{ADMIN_SERVICE_URL}/admin/currencies/{currency_id}",
+        json=request.get_json(silent=True) or {},
+        headers=headers,
+        cookies=cookies
+    )
+    return jsonify(resp.json()), resp.status_code
+
+
+@api.route('/admin/currencies/<currency_id>/status', methods=['PATCH'])
+def proxy_admin_update_currency_status(currency_id):
+    headers = {'Content-Type': 'application/json'}
+    cookies = request.cookies
+    if 'Authorization' in request.headers:
+        headers['Authorization'] = request.headers['Authorization']
+    
+    resp = requests.patch(
+        f"{ADMIN_SERVICE_URL}/admin/currencies/{currency_id}/status",
+        json=request.get_json(silent=True) or {},
+        headers=headers,
+        cookies=cookies
+    )
+    return jsonify(resp.json()), resp.status_code
+
+
+@api.route('/admin/currencies/<currency_id>', methods=['DELETE'])
+def proxy_admin_delete_currency(currency_id):
+    headers = {'Content-Type': 'application/json'}
+    cookies = request.cookies
+    if 'Authorization' in request.headers:
+        headers['Authorization'] = request.headers['Authorization']
+    
+    resp = requests.delete(
+        f"{ADMIN_SERVICE_URL}/admin/currencies/{currency_id}",
+        headers=headers,
+        cookies=cookies
+    )
+    return jsonify(resp.json()), resp.status_code
 
 
 # Portfolio and Ledger Endpoints
@@ -1468,6 +1666,52 @@ def trading_history_proxy():
     except Exception as e:
         app.logger.error(f"Error proxying trading history: {e}")
         return jsonify({"error": "Internal server error"}), 500
+
+# Multi-network deposit proxy endpoints
+@api.route('/wallet/deposit/networks/<token_symbol>', methods=['GET'])
+def proxy_deposit_networks(token_symbol):
+    """Proxy multi-network deposit networks request to wallet service"""
+    try:
+        headers = {"Authorization": request.headers.get("Authorization")}
+        cookies = request.cookies
+        
+        # Forward query parameters (include_testnets)
+        params = request.args.to_dict()
+        
+        resp = requests.get(
+            f"{WALLET_SERVICE_URL}/deposit/networks/{token_symbol}",
+            headers=headers, 
+            cookies=cookies,
+            params=params
+        )
+        
+        app.logger.info(f"Multi-network deposit networks proxy: {resp.status_code}")
+        return jsonify(resp.json()), resp.status_code
+        
+    except Exception as e:
+        app.logger.error(f"Error proxying deposit networks for {token_symbol}: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@api.route('/wallet/deposit/address/<token_symbol>/<network_type>', methods=['GET'])
+def proxy_deposit_address(token_symbol, network_type):
+    """Proxy multi-network deposit address request to wallet service"""
+    try:
+        headers = {"Authorization": request.headers.get("Authorization")}
+        cookies = request.cookies
+        
+        resp = requests.get(
+            f"{WALLET_SERVICE_URL}/api/v1/wallet/deposit/address/{token_symbol}/{network_type}",
+            headers=headers, 
+            cookies=cookies
+        )
+        
+        app.logger.info(f"Multi-network deposit address proxy: {resp.status_code}")
+        return jsonify(resp.json()), resp.status_code
+        
+    except Exception as e:
+        app.logger.error(f"Error proxying deposit address for {token_symbol}/{network_type}: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
 
 app.register_blueprint(api)
 app.register_blueprint(mobile)

@@ -133,9 +133,10 @@ class ReserveService:
     
     def get_all_reserves(self) -> Dict:
         """Get status of all system reserves"""
-        # Define supported currencies and types
-        crypto_currencies = ["BTC", "ETH", "USDC", "USDT", "SOL", "TRX"]
-        fiat_currencies = ["UGX", "KES", "TZS", "USD"]
+        # Get enabled currencies from admin panel
+        from shared.currency_utils import get_cached_enabled_currencies
+        crypto_currencies = get_cached_enabled_currencies()
+        fiat_currencies = ["UGX", "KES", "TZS", "USD"]  # Keep fiat currencies hardcoded for now
         
         reserves = {
             "crypto": {},

@@ -121,6 +121,7 @@ class PnLCalculator:
                 FROM accounts 
                 WHERE user_id = :user_id 
                 AND account_type = 'CRYPTO'
+                AND (label IS NULL OR label NOT LIKE 'RESERVE_%')
             """
             
             params = {'user_id': user_id}

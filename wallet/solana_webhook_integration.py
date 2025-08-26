@@ -126,7 +126,8 @@ class SolanaNotificationService:
         amount: Decimal,
         wallet_address: str,
         slot: Optional[int] = None,
-        confirmations: int = 1
+        confirmations: int = 1,
+        transaction_id: Optional[int] = None
     ):
         """Send Solana deposit notification"""
         try:
@@ -147,7 +148,8 @@ class SolanaNotificationService:
                 wallet_address=wallet_address,
                 block_number=slot,
                 confirmations=confirmations,
-                status='confirmed'  # Solana transactions are confirmed when included
+                status='confirmed',  # Solana transactions are confirmed when included
+                transaction_id=transaction_id
             )
             
             logger.info(f"📢 SOL deposit notification sent for user {user_id}: {amount} SOL")
@@ -162,7 +164,8 @@ class SolanaNotificationService:
         user_id: int,
         transaction_hash: str,
         amount: Decimal,
-        destination_address: str
+        destination_address: str,
+        transaction_id: Optional[int] = None
     ):
         """Send Solana withdrawal notification"""
         try:
@@ -181,7 +184,8 @@ class SolanaNotificationService:
                 amount_usd=amount_usd,
                 amount_ugx=amount_ugx,
                 destination_address=destination_address,
-                status='confirmed'
+                status='confirmed',
+                transaction_id=transaction_id
             )
             
             logger.info(f"📢 SOL withdrawal notification sent for user {user_id}: {amount} SOL")

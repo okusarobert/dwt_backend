@@ -6,6 +6,11 @@ from datetime import datetime
 from typing import Dict, List, Optional
 import time
 from tenacity import retry, stop_after_attempt, wait_exponential
+import sys
+import os
+
+# Add shared directory to Python path
+from shared.currency_utils import get_cached_enabled_currencies
 
 logger = logging.getLogger('crypto_price_service')
 
@@ -13,13 +18,12 @@ class CryptoPriceService:
     def __init__(self, socketio):
         self.socketio = socketio
         self.base_url = "https://api.coingecko.com/api/v3"
-        self.supported_coins = [
-            "bitcoin", "ethereum", "binancecoin", "cardano", 
-            "solana", "polkadot", "tether", "usd-coin", 
-            "ripple", "matic-network", "tron", "litecoin"
-        ]
+        self.supported_coins = []  # Will be loaded dynamically
         self.price_cache: Dict[str, dict] = {}
         self.is_running = False
+        
+        # Load enabled currencies on initialization
+        self.load_enabled_currencies()
         
     @retry(
         stop=stop_after_attempt(3),
@@ -130,6 +134,52 @@ class CryptoPriceService:
         }
         return name_map.get(coin_id, coin_id.title())
     
+    def load_enabled_currencies(self):
+        """Load enabled currencies from database using currency utils"""
+        try:
+            logger.info("Loading enabled currencies from database...")
+            enabled_symbols = get_cached_enabled_currencies()
+            logger.info(f"Retrieved enabled symbols from database: {enabled_symbols}")
+            
+            self.supported_coins = [self.get_coingecko_id(symbol) for symbol in enabled_symbols]
+            self.supported_coins = [coin for coin in self.supported_coins if coin]  # Filter out None values
+            logger.info(f"Loaded {len(self.supported_coins)} enabled currencies from database: {self.supported_coins}")
+            
+            if not self.supported_coins:
+                logger.warning("No enabled currencies found in database, using fallback")
+                self.use_fallback_currencies()
+        except Exception as e:
+            logger.error(f"Error loading currencies from database: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            self.use_fallback_currencies()
+    
+    def use_fallback_currencies(self):
+        """Use fallback currencies if database is unavailable (excluding BTC since it's disabled)"""
+        self.supported_coins = [
+            "ethereum", "solana", "tron", "ripple", "cardano", 
+            "litecoin", "binancecoin", "matic-network"
+        ]
+        logger.warning(f"Using fallback currencies (BTC excluded): {self.supported_coins}")
+    
+    def get_coingecko_id(self, symbol: str) -> Optional[str]:
+        """Map currency symbols to CoinGecko IDs"""
+        symbol_to_id_map = {
+            "BTC": "bitcoin",
+            "ETH": "ethereum", 
+            "BNB": "binancecoin",
+            "ADA": "cardano",
+            "SOL": "solana",
+            "DOT": "polkadot",
+            "USDT": "tether",
+            "USDC": "usd-coin",
+            "XRP": "ripple",
+            "MATIC": "matic-network",
+            "TRX": "tron",
+            "LTC": "litecoin"
+        }
+        return symbol_to_id_map.get(symbol.upper())
+    
     async def broadcast_prices(self, prices: List[dict]):
         """Broadcast price updates to all connected clients"""
         try:
@@ -146,8 +196,15 @@ class CryptoPriceService:
         
         consecutive_failures = 0
         max_failures = 5
+        currency_reload_counter = 0
         
         while self.is_running:
+            # Reload currencies every 6 iterations (1 minute if interval=10s)
+            if currency_reload_counter >= 6:
+                logger.info("Reloading enabled currencies from database")
+                self.load_enabled_currencies()
+                currency_reload_counter = 0
+            currency_reload_counter += 1
             try:
                 prices = await self.fetch_crypto_prices()
                 if prices:

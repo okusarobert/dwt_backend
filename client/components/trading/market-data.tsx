@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import React from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -8,29 +8,57 @@ import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Activity, TrendingUp, TrendingDown, Wifi, WifiOff } from 'lucide-react';
 import { useCryptoPrices } from '@/hooks/use-crypto-prices';
+import { websocketClient } from '@/lib/websocket-client';
 import { formatUGX, formatPercentage } from '@/lib/currency-formatter';
+import { useTheme } from '@/components/theme/theme-provider';
 import { motion } from 'framer-motion';
 import Image from "next/image";
 import { getCryptoLogo, createFallbackLogo } from "@/lib/crypto-logos";
 
-interface MarketDataProps {
-  onSelectCrypto?: (symbol: string) => void;
-  selectedCrypto?: string;
+interface Currency {
+  code: string;
+  name: string;
+  symbol: string;
+  is_enabled?: boolean;
 }
 
-export function MarketData({ onSelectCrypto, selectedCrypto }: MarketDataProps) {
-  const {
-    prices,
-    isConnected,
-    isLoading,
-    error,
-    formatPrice,
-    formatChange,
-    isPricePositive,
-    getTopPerformers,
-    getWorstPerformers,
-    refresh,
+interface MarketDataProps {
+  currencies: Currency[];
+  onCurrenciesUpdate?: () => void;
+  selectedCrypto?: string;
+  onSelectCrypto?: (symbol: string) => void;
+}
+
+export function MarketData({ currencies, onCurrenciesUpdate, selectedCrypto, onSelectCrypto }: MarketDataProps) {
+  const { theme } = useTheme();
+  const { 
+    prices, 
+    getCryptoBySymbol, 
+    isConnected, 
+    isLoading, 
+    error, 
+    formatPrice, 
+    formatChange, 
+    isPricePositive, 
+    getTopPerformers, 
+    getWorstPerformers, 
+    refresh 
   } = useCryptoPrices();
+  // Listen for currency change events
+  useEffect(() => {
+    if (!onCurrenciesUpdate) return;
+    
+    const handleCurrencyChange = (data: any) => {
+      console.log('Currency change received in MarketData:', data);
+      // Notify parent component to refresh currencies
+      onCurrenciesUpdate();
+    };
+    
+    // Use websocket client's currency change handler
+    const unsubscribe = websocketClient.onCurrencyChange(handleCurrencyChange);
+    
+    return unsubscribe;
+  }, [onCurrenciesUpdate]);
 
   const [logoErrors, setLogoErrors] = useState<Record<string, boolean>>({});
 
@@ -74,8 +102,21 @@ export function MarketData({ onSelectCrypto, selectedCrypto }: MarketDataProps) 
     );
   }
 
-  const topPerformers = getTopPerformers(5);
-  const worstPerformers = getWorstPerformers(5);
+  // Filter prices to only show enabled currencies
+  const enabledPrices = prices.filter(crypto => {
+    const currency = currencies.find(c => c.symbol === crypto.symbol);
+    return currency?.is_enabled !== false;
+  });
+
+  const topPerformers = getTopPerformers(5).filter(crypto => {
+    const currency = currencies.find(c => c.symbol === crypto.symbol);
+    return currency?.is_enabled !== false;
+  });
+  
+  const worstPerformers = getWorstPerformers(5).filter(crypto => {
+    const currency = currencies.find(c => c.symbol === crypto.symbol);
+    return currency?.is_enabled !== false;
+  });
 
   return (
     <Card className="shadow-sm">
@@ -106,13 +147,13 @@ export function MarketData({ onSelectCrypto, selectedCrypto }: MarketDataProps) 
           </TabsList>
 
           <TabsContent value="all" className="space-y-1 sm:space-y-2 mt-3">
-            {prices.length === 0 ? (
+            {enabledPrices.length === 0 ? (
               <div className="text-center py-8 text-muted-foreground">
                 <Activity className="w-8 h-8 mx-auto mb-2 opacity-50" />
                 <p className="text-sm">No market data available</p>
               </div>
             ) : (
-              prices.map((crypto) => (
+              enabledPrices.map((crypto) => (
                 <CryptoRow
                   key={crypto.symbol}
                   crypto={crypto}
@@ -212,7 +253,7 @@ function CryptoRow({ crypto, isSelected, onSelect, logoError, onLogoError }: Cry
               />
             )}
             <div>
-              <div className="font-medium text-sm">{crypto.symbol}</div>
+              <div className="font-medium text-xs">{crypto.symbol}</div>
               <div className="text-xs text-muted-foreground truncate max-w-[120px]">{crypto.name}</div>
             </div>
           </div>
@@ -230,7 +271,7 @@ function CryptoRow({ crypto, isSelected, onSelect, logoError, onLogoError }: Cry
           </div>
         </div>
         <div className="text-right">
-          <div className="font-semibold text-sm">
+          <div className="font-semibold text-xs">
             {formatUGX(crypto.price)}
           </div>
         </div>
@@ -258,16 +299,16 @@ function CryptoRow({ crypto, isSelected, onSelect, logoError, onLogoError }: Cry
             />
           )}
           <div>
-            <div className="font-medium">{crypto.symbol}</div>
-            <div className="text-sm text-muted-foreground">{crypto.name}</div>
+            <div className="font-medium text-xs">{crypto.symbol}</div>
+            <div className="text-xs text-muted-foreground">{crypto.name}</div>
           </div>
         </div>
 
         <div className="text-right">
-          <div className="font-medium">
+          <div className="font-medium text-xs">
             {formatUGX(crypto.price)}
           </div>
-          <div className={`text-sm flex items-center gap-1 ${
+          <div className={`text-xs flex items-center gap-1 ${
             crypto.changePercent24h >= 0 ? 'text-green-600' : 'text-red-600'
           }`}>
             {crypto.changePercent24h >= 0 ? (

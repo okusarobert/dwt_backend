@@ -3,6 +3,7 @@ export const getCryptoLogo = (symbol: string): string => {
   // Map of supported cryptocurrencies using cryptocurrency-icons library
   const logoMap: Record<string, string> = {
     BTC: "/crypto-logos/btc.svg",
+    LTC: "/crypto-logos/ltc.svg",
     ETH: "/crypto-logos/eth.svg",
     XRP: "/crypto-logos/xrp.svg",
     BNB: "/crypto-logos/bnb.svg",
@@ -12,6 +13,9 @@ export const getCryptoLogo = (symbol: string): string => {
     SOL: "/crypto-logos/sol.svg",
     USDT: "/crypto-logos/usdt.svg",
     USDC: "/crypto-logos/usdc.svg",
+    BASE: "/crypto-logos/base.svg",
+    ARB: "/crypto-logos/arb.svg",
+    OP: "/crypto-logos/op.svg",
     // Add more mappings as needed
   };
 
@@ -56,6 +60,7 @@ export const getCryptoColor = (symbol: string): string => {
   // Default colors for common cryptocurrencies
   const colorMap: Record<string, string> = {
     BTC: "#F7931A", // Bitcoin orange
+    LTC: "#BFBBBB", // Litecoin silver
     ETH: "#627EEA", // Ethereum blue
     XRP: "#23292F", // Ripple black
     BNB: "#F3BA2F", // Binance Coin yellow
@@ -65,6 +70,9 @@ export const getCryptoColor = (symbol: string): string => {
     SOL: "#00FFA3", // Solana green
     USDT: "#26A17B", // Tether green
     USDC: "#2775CA", // USD Coin blue
+    BASE: "#0052FF", // Base blue
+    ARB: "#28A0F0", // Arbitrum blue
+    OP: "#FF0420", // Optimism red
   };
 
   return colorMap[symbol.toUpperCase()] || "#6B7280"; // Default gray

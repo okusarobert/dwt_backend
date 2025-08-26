@@ -12,7 +12,7 @@ import threading
 import os
 import json
 from confluent_kafka import Consumer
-from db.wallet import TransactionType, Reservation, ReservationType, Transaction, PaymentProvider, TransactionStatus, AccountType, PortfolioSnapshot, Trade, TradeType, TradeStatus, PaymentMethod, Voucher, VoucherStatus
+from db.wallet import TransactionType, Reservation, ReservationType, Transaction, PaymentProvider, TransactionStatus, AccountType, PortfolioSnapshot, Trade, TradeType, TradeStatus, PaymentMethod, Voucher, VoucherStatus, CryptoAddress
 from db import Account
 import logging
 import datetime
@@ -41,6 +41,8 @@ from shared.crypto.price_cache_service import get_price_cache_service, get_cache
 from shared.crypto.price_refresh_service import start_price_refresh_service
 from blockcypher_webhook import blockcypher_webhook
 from solana_webhook import solana_webhook
+from ethereum_webhook import ethereum_webhook
+from bnb_webhook import bnb_webhook
 from shared.crypto.clients.btc import BTCWallet,BitcoinConfig
 from shared.crypto.clients.tron import TronWallet, TronWalletConfig
 
@@ -99,8 +101,9 @@ app.logger = setup_logging()
 def get_trading_crypto_prices(current_user):
     """Get current crypto prices in UGX"""
     try:
-        # Get all supported cryptocurrencies with UGX prices
-        cryptocurrencies = ['BTC', 'ETH', 'SOL', 'BNB', 'USDT', 'ADA', 'MATIC']
+        # Get all enabled cryptocurrencies from admin panel
+        from shared.currency_utils import get_cached_enabled_currencies
+        cryptocurrencies = get_cached_enabled_currencies()
         prices = {}
         
         for crypto in cryptocurrencies:
@@ -153,10 +156,10 @@ def generate_deposit_address(current_user, crypto):
         crypto = crypto.upper()
         session = db.connection.get_session()
         
-        # Validate supported crypto
-        supported_cryptos = ['BTC', 'ETH', 'SOL', 'BNB', 'USDT', 'TRX', 'LTC']
-        if crypto not in supported_cryptos:
-            return jsonify({"success": False, "error": f"Unsupported cryptocurrency: {crypto}"}), 400
+        # Validate supported crypto using admin panel
+        from shared.currency_utils import is_currency_enabled
+        if not is_currency_enabled(crypto):
+            return jsonify({"success": False, "error": f"Cryptocurrency {crypto} is not enabled or supported"}), 400
         
         # Check if user already has a deposit address for this crypto
         existing_address = session.query(CryptoAddress).filter(
@@ -184,8 +187,32 @@ def generate_deposit_address(current_user, crypto):
             trx_wallet = TRX()
             address = trx_wallet.create_address()
         elif crypto == 'BNB':
-            bnb_wallet = BNB()
-            address = bnb_wallet.create_address()
+            # Use multi-network deposit system for BNB
+            from wallet.multi_network_deposits import MultiNetworkDepositManager
+            manager = MultiNetworkDepositManager()
+            result = manager.create_multi_network_deposit_address(
+                user_id=current_user.id,
+                networks=['BNB']
+            )
+            if result.get('success'):
+                # Get the created address
+                bnb_account = session.query(Account).filter_by(
+                    user_id=current_user.id,
+                    currency='BNB',
+                    account_type='CRYPTO'
+                ).first()
+                if bnb_account:
+                    bnb_address = session.query(CryptoAddress).filter_by(
+                        account_id=bnb_account.id
+                    ).first()
+                    if bnb_address:
+                        address = bnb_address.address
+                    else:
+                        return jsonify({"success": False, "error": "Failed to retrieve BNB address"}), 500
+                else:
+                    return jsonify({"success": False, "error": "Failed to create BNB account"}), 500
+            else:
+                return jsonify({"success": False, "error": "Failed to generate BNB address"}), 500
         elif crypto == 'LTC':
             ltc_wallet = LTC()
             address = ltc_wallet.create_address()
@@ -238,10 +265,10 @@ def withdraw_crypto(current_user, crypto):
         if not amount or not address:
             return jsonify({"success": False, "error": "Amount and address are required"}), 400
         
-        # Validate supported crypto
-        supported_cryptos = ['BTC', 'ETH', 'SOL', 'BNB', 'USDT', 'TRX', 'LTC']
-        if crypto not in supported_cryptos:
-            return jsonify({"success": False, "error": f"Unsupported cryptocurrency: {crypto}"}), 400
+        # Validate supported crypto using admin panel
+        from shared.currency_utils import is_currency_enabled
+        if not is_currency_enabled(crypto):
+            return jsonify({"success": False, "error": f"Cryptocurrency {crypto} is not enabled or supported"}), 400
         
         session = db.connection.get_session()
         
@@ -491,6 +518,38 @@ def calculate_trade(current_user):
         app.logger.error(f"Error calculating trade: {e}")
         return jsonify({"success": False, "error": str(e)}), 400
 
+@app.route('/api/trading/quote', methods=['POST'])
+@token_required
+def get_trading_quote(current_user):
+    """Get quote for buying specified crypto amount"""
+    try:
+        data = request.get_json()
+        
+        crypto_currency = data.get('crypto_currency', 'BTC')
+        fiat_currency = data.get('fiat_currency', 'UGX')
+        crypto_amount = float(data.get('crypto_amount', 0))
+        payment_method = PaymentMethod(data.get('payment_method', 'mobile_money'))
+        
+        if crypto_amount <= 0:
+            return jsonify({"success": False, "error": "Crypto amount must be greater than 0"}), 400
+        
+        # Get quote from trading service
+        quote = trading_service.get_quote_for_crypto_amount(
+            crypto_currency=crypto_currency,
+            fiat_currency=fiat_currency,
+            crypto_amount=crypto_amount,
+            payment_method=payment_method
+        )
+        
+        return jsonify({
+            "success": True,
+            "data": quote
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Error getting trading quote: {e}")
+        return jsonify({"success": False, "error": str(e)}), 400
+
 @app.route('/api/trading/buy', methods=['POST'])
 @token_required
 def buy_crypto(current_user):
@@ -499,20 +558,40 @@ def buy_crypto(current_user):
         data = request.get_json()
         
         crypto_currency = data.get('crypto_currency', 'BTC')
-        fiat_currency = data.get('fiat_currency', 'USD')
+        fiat_currency = data.get('fiat_currency', 'UGX')
         amount = float(data.get('amount', 0))
         payment_method = PaymentMethod(data.get('payment_method', 'mobile_money'))
         payment_details = data.get('payment_details', {})
+
+        app.logger.info(f"PAYMENT DETAILS: { payment_details}")
+        
+        # Check if this is a crypto amount (from quote) or fiat amount
+        amount_type = data.get('amount_type', 'fiat')  # 'fiat' or 'crypto'
         
         session = db.connection.get_session()
         
-        # Create trade
+        # If crypto amount specified, calculate the required fiat amount
+        if amount_type == 'crypto':
+            # Get quote to determine fiat amount needed
+            quote = trading_service.get_quote_for_crypto_amount(
+                crypto_currency=crypto_currency,
+                fiat_currency=fiat_currency,
+                crypto_amount=amount,
+                payment_method=payment_method
+            )
+            # Use the total fiat cost as the amount for trade creation
+            fiat_amount = quote['total_fiat_cost']
+        else:
+            # User specified fiat amount
+            fiat_amount = amount
+        
+        # Create trade with fiat amount
         trade = trading_service.create_trade(
             user_id=current_user.id,
             trade_type=TradeType.BUY,
             crypto_currency=crypto_currency,
             fiat_currency=fiat_currency,
-            amount=amount,
+            amount=fiat_amount,
             payment_method=payment_method,
             payment_details=payment_details,
             session=session
@@ -629,11 +708,13 @@ def get_user_trades(current_user):
         for trade in trades:
             trades_data.append({
                 'id': trade.id,
+                'type': trade.trade_type.value.lower(),  # Frontend expects 'buy' or 'sell'
                 'trade_type': trade.trade_type.value,
                 'crypto_currency': trade.crypto_currency,
                 'fiat_currency': trade.fiat_currency,
                 'crypto_amount': float(trade.crypto_amount),
                 'fiat_amount': float(trade.fiat_amount),
+                'total_amount': float(trade.fiat_amount),  # Frontend expects total_amount
                 'exchange_rate': float(trade.exchange_rate),
                 'fee_amount': float(trade.fee_amount),
                 'status': trade.status.value,
@@ -1001,38 +1082,71 @@ def buy_complete_webhook():
             app.logger.warning("Buy webhook secret configured but no signature provided")
             return jsonify({"success": False, "error": "Missing signature"}), 401
         
-        trade_id = data.get('trade_id')
+        customer_reference = data.get('customer_reference')
         status = data.get('status')
         crypto_amount = data.get('crypto_amount')
         transaction_hash = data.get('transaction_hash')
         
-        if not trade_id or not status:
+        if not customer_reference or not status:
+            app.logger.error(f"Missing required fields: customer_reference={customer_reference}, status={status}")
             return jsonify({"success": False, "error": "Missing required fields"}), 400
+        
+        # Extract trade ID from customer_reference (format: "TRADE_36" -> 36)
+        try:
+            trade_id = int(customer_reference.split('_')[1])
+        except (IndexError, ValueError) as e:
+            app.logger.error(f"Invalid customer_reference format: {customer_reference}")
+            return jsonify({"success": False, "error": "Invalid customer_reference format"}), 400
         
         session = db.connection.get_session()
         trade = session.query(Trade).filter(Trade.id == trade_id).first()
         
         if trade:
-            if status == 'completed':
-                trade.status = TradeStatus.COMPLETED
-                trade.completed_at = datetime.datetime.utcnow()
-                trade.trade_metadata = trade.trade_metadata or {}
-                trade.trade_metadata['crypto_transaction_hash'] = transaction_hash
-                trade.trade_metadata['webhook_received_at'] = datetime.datetime.utcnow().isoformat()
+            if status == 'success':
+                # Execute the trade if not already executed
+                if trade.status == TradeStatus.PAYMENT_PENDING:
+                    from trading_service import TradingService
+                    trading_service = TradingService()
+                    
+                    # Execute the buy trade (credit user wallet, update reserves, create accounting entries)
+                    success = trading_service._execute_buy_trade(trade, session)
+                    
+                    if success:
+                        trade.status = TradeStatus.COMPLETED
+                        trade.completed_at = datetime.datetime.utcnow()
+                        trade.trade_metadata = trade.trade_metadata or {}
+                        trade.trade_metadata['crypto_transaction_hash'] = transaction_hash
+                        trade.trade_metadata['webhook_received_at'] = datetime.datetime.utcnow().isoformat()
+                        
+                        # Update crypto transaction if exists
+                        if trade.crypto_transaction_id:
+                            crypto_transaction = session.query(Transaction).filter(
+                                Transaction.id == trade.crypto_transaction_id
+                            ).first()
+                            if crypto_transaction:
+                                crypto_transaction.metadata_json = crypto_transaction.metadata_json or {}
+                                crypto_transaction.metadata_json['blockchain_hash'] = transaction_hash
+                                crypto_transaction.metadata_json['webhook_processed'] = True
+                        
+                        # Send WebSocket notification for trade completion
+                        app.logger.info(f"🔔 About to send trade completion notification for webhook-completed trade {trade_id}")
+                        trading_service._send_trade_completion_notification(trade)
+                        
+                        app.logger.info(f"Buy trade {trade_id} executed and completed via webhook")
+                    else:
+                        trade.status = TradeStatus.FAILED
+                        trade.trade_metadata = trade.trade_metadata or {}
+                        trade.trade_metadata['webhook_error'] = 'Failed to execute trade'
+                        trade.trade_metadata['webhook_received_at'] = datetime.datetime.utcnow().isoformat()
+                        app.logger.error(f"Buy trade {trade_id} execution failed via webhook")
+                else:
+                    # Trade already executed, just update metadata
+                    trade.trade_metadata = trade.trade_metadata or {}
+                    trade.trade_metadata['crypto_transaction_hash'] = transaction_hash
+                    trade.trade_metadata['webhook_received_at'] = datetime.datetime.utcnow().isoformat()
+                    app.logger.info(f"Buy trade {trade_id} webhook received (already executed)")
                 
-                # Update crypto transaction if exists
-                if trade.crypto_transaction_id:
-                    crypto_transaction = session.query(Transaction).filter(
-                        Transaction.id == trade.crypto_transaction_id
-                    ).first()
-                    if crypto_transaction:
-                        crypto_transaction.metadata_json = crypto_transaction.metadata_json or {}
-                        crypto_transaction.metadata_json['blockchain_hash'] = transaction_hash
-                        crypto_transaction.metadata_json['webhook_processed'] = True
-                
-                app.logger.info(f"Buy trade {trade_id} completed via webhook")
-                
-            elif status == 'failed':
+            else:
                 trade.status = TradeStatus.FAILED
                 trade.trade_metadata = trade.trade_metadata or {}
                 trade.trade_metadata['webhook_error'] = data.get('error_message', 'Unknown error')
@@ -1053,8 +1167,9 @@ def buy_complete_webhook():
             }
             
             try:
-                from shared.kafka_producer import send_kafka_message
-                send_kafka_message('trade-notifications', notification_data)
+                from shared.kafka_producer import get_kafka_producer
+                producer = get_kafka_producer()
+                producer.send('trade-notifications', notification_data)
             except Exception as e:
                 app.logger.error(f"Failed to send trade notification: {e}")
         
@@ -1097,47 +1212,162 @@ def sell_complete_webhook():
             app.logger.warning("Sell webhook secret configured but no signature provided")
             return jsonify({"success": False, "error": "Missing signature"}), 401
         
-        trade_id = data.get('trade_id')
+        customer_reference = data.get('customer_reference')
         status = data.get('status')
-        fiat_amount = data.get('fiat_amount')
-        payment_reference = data.get('payment_reference')
+        fiat_amount = data.get('amount')
+        payment_reference = data.get('internal_reference')
+
+        app.logger.info(f"Status: {status}")
+        app.logger.info(f"Customer Reference: {customer_reference}")
+        app.logger.info(f"Fiat Amount: {fiat_amount} (from 'amount' field)")
+        app.logger.info(f"Payment Reference: {payment_reference} (from 'internal_reference' field)")
+        app.logger.info(f"Raw webhook data keys: {list(data.keys())}")
         
-        if not trade_id or not status:
+        if not customer_reference or not status:
             return jsonify({"success": False, "error": "Missing required fields"}), 400
+        
+        # Extract trade ID from customer reference (format: PAYOUT_69 -> 69)
+        try:
+            trade_id = int(customer_reference.split('_')[1])
+            app.logger.info(f"Extracted trade ID: {trade_id}")
+        except (IndexError, ValueError) as e:
+            app.logger.error(f"Failed to extract trade ID from customer_reference '{customer_reference}': {e}")
+            return jsonify({"success": False, "error": "Invalid customer reference format"}), 400
         
         session = db.connection.get_session()
         trade = session.query(Trade).filter(Trade.id == trade_id).first()
         
         if trade:
-            if status == 'completed':
-                trade.status = TradeStatus.COMPLETED
-                trade.completed_at = datetime.datetime.utcnow()
-                trade.payment_reference = payment_reference
-                trade.trade_metadata = trade.trade_metadata or {}
-                trade.trade_metadata['webhook_received_at'] = datetime.datetime.utcnow().isoformat()
-                trade.trade_metadata['payment_processed'] = True
-                
-                # Update fiat transaction if exists
-                if trade.fiat_transaction_id:
-                    fiat_transaction = session.query(Transaction).filter(
-                        Transaction.id == trade.fiat_transaction_id
-                    ).first()
-                    if fiat_transaction:
-                        fiat_transaction.metadata_json = fiat_transaction.metadata_json or {}
-                        fiat_transaction.metadata_json['payment_reference'] = payment_reference
-                        fiat_transaction.metadata_json['webhook_processed'] = True
-                
-                app.logger.info(f"Sell trade {trade_id} completed via webhook")
+            app.logger.info(f"Processing webhook for trade {trade_id}: current status = {trade.status}, webhook status = {status}")
+            
+            if status == 'success':
+                app.logger.info(f"Sell trade is success")
+                # Only update if trade is not already completed
+                if trade.status != TradeStatus.COMPLETED:
+                    app.logger.info(f"Finalizing trade {trade_id}")
+                    # Now finalize the trade - debit balance and credit reserve
+                    from trading_service import TradingService
+                    trading_service = TradingService()
+                    
+                    # Get user's crypto account
+                    account = session.query(Account).filter_by(id=trade.account_id).first()
+                    if account:
+                        # Find the reservation for this trade
+                        reservation_ref = f"sell_trade_{trade.id}_"
+                        reservation = session.query(Reservation).filter(
+                            Reservation.reference.startswith(reservation_ref),
+                            Reservation.type == ReservationType.RESERVE,
+                            Reservation.status == "active"
+                        ).first()
+                        
+                        if reservation:
+                            # Finalize the trade
+                            trading_service._finalize_sell_trade(trade, account, reservation.reference, session)
+                            from shared.currency_precision import AmountConverter
+                            app.logger.info(f"✅ Finalized sell trade {trade_id} via successful webhook")
+                            
+                            # Store flag to send notification after commit
+                            send_notification = True
+                        else:
+                            app.logger.warning(f"No active reservation found for completing trade {trade_id}")
+                            send_notification = False
+                    
+                    # Update webhook metadata
+                    trade.payment_reference = payment_reference
+                    trade.trade_metadata = trade.trade_metadata or {}
+                    trade.trade_metadata['webhook_received_at'] = datetime.datetime.utcnow().isoformat()
+                    trade.trade_metadata['payment_processed'] = True
+                    
+                    # Update fiat transaction if exists
+                    if trade.fiat_transaction_id:
+                        fiat_transaction = session.query(Transaction).filter(
+                            Transaction.id == trade.fiat_transaction_id
+                        ).first()
+                        if fiat_transaction:
+                            fiat_transaction.metadata_json = fiat_transaction.metadata_json or {}
+                            fiat_transaction.metadata_json['payment_reference'] = payment_reference
+                            fiat_transaction.metadata_json['webhook_processed'] = True
+                    
+                    app.logger.info(f"✅ Sell trade {trade_id} completed via webhook")
+                else:
+                    app.logger.info(f"Trade {trade_id} already completed - ignoring duplicate completion webhook")
                 
             elif status == 'failed':
-                trade.status = TradeStatus.FAILED
-                trade.trade_metadata = trade.trade_metadata or {}
-                trade.trade_metadata['webhook_error'] = data.get('error_message', 'Unknown error')
-                trade.trade_metadata['webhook_received_at'] = datetime.datetime.utcnow().isoformat()
-                
-                app.logger.error(f"Sell trade {trade_id} failed via webhook: {data.get('error_message')}")
+                # Handle failed payout based on current trade status
+                if trade.status == TradeStatus.COMPLETED:
+                    # Trade was completed but payout failed - reverse the trade
+                    app.logger.warning(f"Trade {trade_id} was completed but payout failed - reversing trade")
+                    
+                    from trading_service import TradingService
+                    trading_service = TradingService()
+                    
+                    # Get user's crypto account
+                    account = session.query(Account).filter_by(id=trade.account_id).first()
+                    if account:
+                        # Restore user's crypto balance (add back what was debited)
+                        current_balance = account.crypto_balance_smallest_unit or 0
+                        account.crypto_balance_smallest_unit = current_balance + trade.crypto_amount_smallest_unit
+                        account.balance = float(account.balance) + float(trade.crypto_amount)
+                        
+                        # Remove crypto from reserve account (reverse the credit)
+                        trading_service._adjust_reserve_balance(trade.crypto_currency, -trade.crypto_amount_smallest_unit, session)
+                        
+                        app.logger.info(f"🔄 Reversed trade {trade_id}: restored {AmountConverter.format_display_amount(trade.crypto_amount_smallest_unit, trade.crypto_currency)} to user")
+                    
+                    # Mark trade as failed with reversal metadata
+                    trade.status = TradeStatus.FAILED
+                    trade.trade_metadata = trade.trade_metadata or {}
+                    trade.trade_metadata['webhook_error'] = data.get('message', 'Payout failed')
+                    trade.trade_metadata['webhook_received_at'] = datetime.datetime.utcnow().isoformat()
+                    trade.trade_metadata['trade_reversed'] = True
+                    
+                    app.logger.error(f"❌ Trade {trade_id} reversed due to payout failure: {data.get('message')}")
+                    
+                elif trade.status == TradeStatus.PROCESSING:
+                    # Trade is still processing - cancel reservation and fail trade
+                    app.logger.info(f"Trade {trade_id} processing failed - cancelling reservation")
+                    
+                    from trading_service import TradingService
+                    trading_service = TradingService()
+                    
+                    # Get user's crypto account
+                    account = session.query(Account).filter_by(id=trade.account_id).first()
+                    if account:
+                        # Find and cancel active reservation
+                        reservation_ref = f"sell_trade_{trade.id}_"
+                        reservation = session.query(Reservation).filter(
+                            Reservation.reference.startswith(reservation_ref),
+                            Reservation.type == ReservationType.RESERVE,
+                            Reservation.status == "active"
+                        ).first()
+                        
+                        if reservation:
+                            trading_service._cancel_sell_trade_reservation(reservation.reference, account, session)
+                            app.logger.info(f"🔓 Cancelled reservation: {reservation.reference}")
+                        else:
+                            app.logger.warning(f"No active reservation found for processing trade {trade_id}")
+                    
+                    # Mark trade as failed
+                    trade.status = TradeStatus.FAILED
+                    trade.trade_metadata = trade.trade_metadata or {}
+                    trade.trade_metadata['webhook_error'] = data.get('message', 'Processing failed')
+                    trade.trade_metadata['webhook_received_at'] = datetime.datetime.utcnow().isoformat()
+                    
+                    app.logger.error(f"❌ Trade {trade_id} processing failed: {data.get('message')}")
+                    
+                else:
+                    # Trade already failed or in other status - just update metadata
+                    app.logger.info(f"Trade {trade_id} already in status {trade.status} - updating metadata only")
+                    trade.trade_metadata = trade.trade_metadata or {}
+                    trade.trade_metadata['webhook_error'] = data.get('message', 'Unknown error')
+                    trade.trade_metadata['webhook_received_at'] = datetime.datetime.utcnow().isoformat()
             
             session.commit()
+            
+            # Send WebSocket notification for sell trade completion after commit
+            if status == 'success' and 'send_notification' in locals() and send_notification:
+                app.logger.info(f"🔔 About to send sell trade completion notification for webhook-completed trade {trade_id}")
+                trading_service._send_trade_completion_notification(trade)
             
             # Send notification via Kafka
             notification_data = {
@@ -1150,8 +1380,9 @@ def sell_complete_webhook():
             }
             
             try:
-                from shared.kafka_producer import send_kafka_message
-                send_kafka_message('trade-notifications', notification_data)
+                from shared.kafka_producer import get_kafka_producer
+                producer = get_kafka_producer()
+                producer.send('trade-notifications', notification_data)
             except Exception as e:
                 app.logger.error(f"Failed to send trade notification: {e}")
         
@@ -1235,8 +1466,9 @@ def trade_status_webhook():
             }
             
             try:
-                from shared.kafka_producer import send_kafka_message
-                send_kafka_message('trade-notifications', notification_data)
+                from shared.kafka_producer import get_kafka_producer
+                producer = get_kafka_producer()
+                producer.send('trade-notifications', notification_data)
             except Exception as e:
                 app.logger.error(f"Failed to send trade notification: {e}")
         
@@ -3057,7 +3289,7 @@ def wallet_transactions():
                     # Also add formatted amount for display
                     tx_dict['formatted_amount'] = AmountConverter.format_display_amount(tx.amount_smallest_unit, currency)
                 except Exception as e:
-                    logger.warning(f"Failed to convert amount for currency {currency}: {e}")
+                    app.logger.warning(f"Failed to convert amount for currency {currency}: {e}")
             
             transactions_data.append(tx_dict)
         
@@ -3077,6 +3309,8 @@ def wallet_transactions():
         
         return jsonify(response_data), 200
     except Exception as e:
+        app.logger.error(f"Error getting transactions: {e}")
+        app.logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 400
 
 @app.route("/wallet/transactions/<int:transaction_id>", methods=["GET"])
@@ -4229,6 +4463,36 @@ def create_crypto_addresses_for_user(user_id):
                             "account_id": crypto_account.id
                         })
                         app.logger.info(f"[Admin] Created {symbol} address for user {user_id}: {created_address.address}")
+                
+                # Special handling for BNB addresses to use the BNB client's create_address method
+                elif symbol.upper() == "BNB":
+                    # Use the BNB client directly for automatic Kafka notification
+                    from shared.crypto.clients.evm_base_client import create_bnb_client
+                    
+                    bnb_wallet = create_bnb_client(
+                        user_id=user_id,
+                        session=session,
+                        network="mainnet",
+                        api_key=config('ALCHEMY_API_KEY', default='')
+                    )
+                    bnb_wallet.account_id = crypto_account.id
+                    
+                    # This will automatically create the address and send Kafka notification
+                    bnb_wallet.create_address(notify=True)
+                    
+                    # Get the created address from the database
+                    created_address = session.query(CryptoAddress).filter_by(
+                        account_id=crypto_account.id,
+                        currency_code=symbol
+                    ).first()
+                    
+                    if created_address:
+                        created_addresses.append({
+                            "symbol": symbol,
+                            "address": created_address.address,
+                            "account_id": crypto_account.id
+                        })
+                        app.logger.info(f"[Admin] Created {symbol} address for user {user_id}: {created_address.address}")
                     else:
                         app.logger.error(f"[Admin] Failed to retrieve created {symbol} address for user {user_id}")
                         
@@ -4476,6 +4740,277 @@ def unregister_solana_address_from_webhook():
 # app.register_blueprint(schemas_bp)
 app.register_blueprint(blockcypher_webhook)
 app.register_blueprint(solana_webhook)
+app.register_blueprint(ethereum_webhook)
+app.register_blueprint(bnb_webhook)
+
+@app.route("/wallet/withdraw/bnb", methods=["POST"])
+@token_required
+def wallet_withdraw_bnb():
+    """
+    Withdraw BNB to an external address
+    
+    Request body:
+    {
+        "to_address": "0x742d35Cc6634C0532925a3b8D4C9db96C4b4d8b6",
+        "amount": 0.01,
+        "reference_id": "bnb_withdraw_123",
+        "description": "BNB withdrawal",
+        "gas_limit": 21000
+    }
+    """
+    try:
+        user_id = g.user.id
+        data = request.get_json()
+        
+        # Validate required fields
+        to_address = data.get("to_address")
+        amount = data.get("amount")
+        reference_id = data.get("reference_id")
+        description = data.get("description", "BNB withdrawal")
+        gas_limit = data.get("gas_limit", 21000)
+        token_contract = data.get("token_contract")
+        token_symbol = (data.get("token_symbol") or "").upper() if data.get("token_symbol") else None
+        token_decimals = data.get("token_decimals")
+        
+        missing_fields = []
+        if not to_address:
+            missing_fields.append({"to_address": "Missing required field"})
+        if amount is None:
+            missing_fields.append({"amount": "Missing required field"})
+        if not reference_id:
+            missing_fields.append({"reference_id": "Missing required field"})
+        
+        if missing_fields:
+            return jsonify({"error": missing_fields}), 400
+        
+        # Validate amount
+        try:
+            amount = float(amount)
+            if amount <= 0:
+                return jsonify({"error": [{"amount": "Amount must be greater than 0"}]}), 400
+        except (ValueError, TypeError):
+            return jsonify({"error": [{"amount": "Invalid amount format"}]}), 400
+        
+        # Validate BNB address (same format as Ethereum)
+        if not to_address.startswith("0x") or len(to_address) != 42:
+            return jsonify({"error": [{"to_address": "Invalid BNB address format"}]}), 400
+        
+        session = db.connection.session
+        
+        try:
+            # Get user's BNB account
+            bnb_account = session.query(Account).filter_by(
+                user_id=user_id,
+                currency="BNB",
+                account_type=AccountType.CRYPTO
+            ).first()
+            
+            if not bnb_account:
+                return jsonify({"error": [{"account": "BNB account not found"}]}), 404
+            
+            # Convert amount to smallest unit (wei for BNB)
+            from shared.currency_precision import AmountConverter
+            converter = AmountConverter()
+            amount_smallest_unit = converter.to_smallest_unit(amount, "BNB")
+            
+            # Check balance
+            current_balance_smallest_unit = bnb_account.crypto_balance_smallest_unit or 0
+            
+            if current_balance_smallest_unit < amount_smallest_unit:
+                available_display = converter.from_smallest_unit(current_balance_smallest_unit, "BNB")
+                return jsonify({"error": [{"amount": f"Insufficient balance. Available: {available_display}"}]}), 400
+        
+            # Initialize BNB wallet
+            from shared.crypto.clients.evm_base_client import create_bnb_client
+        
+            api_key = config('ALCHEMY_API_KEY', default='')
+            if not api_key:
+                return jsonify({"error": [{"system": "BNB API key not configured"}]}), 500
+            
+            bnb_wallet = create_bnb_client(user_id=user_id, session=session, network="mainnet", api_key=api_key)
+            bnb_wallet.account_id = bnb_account.id
+            
+            # Execute withdrawal
+            try:
+                tx_hash = bnb_wallet.send_transaction(
+                    to_address=to_address,
+                    amount=amount,
+                    gas_limit=gas_limit,
+                    token_contract=token_contract,
+                    token_symbol=token_symbol,
+                    token_decimals=token_decimals
+                )
+                
+                # Create withdrawal transaction record
+                withdrawal_transaction = Transaction(
+                    account_id=bnb_account.id,
+                    amount=amount,
+                    amount_smallest_unit=amount_smallest_unit,
+                    precision_config={
+                        "currency": "BNB",
+                        "decimals": 18,
+                        "smallest_unit": "wei"
+                    },
+                    type=TransactionType.WITHDRAWAL,
+                    status=TransactionStatus.PENDING,
+                    reference_id=reference_id,
+                    description=description,
+                    metadata={
+                        "to_address": to_address,
+                        "tx_hash": tx_hash,
+                        "gas_limit": gas_limit,
+                        "token_contract": token_contract,
+                        "token_symbol": token_symbol,
+                        "token_decimals": token_decimals
+                    }
+                )
+                session.add(withdrawal_transaction)
+                
+                # Create reservation to lock the funds
+                reservation_reference = f"bnb_withdraw_{reference_id}_{int(time.time())}"
+                reservation = Reservation(
+                    account_id=bnb_account.id,
+                    amount=amount,
+                    amount_smallest_unit=amount_smallest_unit,
+                    precision_config={
+                        "currency": "BNB",
+                        "decimals": 18,
+                        "smallest_unit": "wei"
+                    },
+                    type=ReservationType.WITHDRAWAL,
+                    reference_id=reservation_reference,
+                    description=f"BNB withdrawal reservation for {reference_id}",
+                    metadata={
+                        "withdrawal_reference": reference_id,
+                        "tx_hash": tx_hash,
+                        "to_address": to_address
+                    }
+                )
+                session.add(reservation)
+                
+                # Update account balance
+                bnb_account.crypto_balance_smallest_unit = current_balance_smallest_unit - amount_smallest_unit
+                bnb_account.crypto_locked_amount_smallest_unit = (bnb_account.crypto_locked_amount_smallest_unit or 0) + amount_smallest_unit
+                
+                session.commit()
+                
+                app.logger.info(f"✅ BNB withdrawal initiated successfully")
+                app.logger.info(f"   User: {user_id}")
+                app.logger.info(f"   Amount: {amount} BNB")
+                app.logger.info(f"   To: {to_address}")
+                app.logger.info(f"   TX Hash: {tx_hash}")
+                app.logger.info(f"   Reference: {reference_id}")
+                app.logger.info(f"   Reservation: {reservation_reference}")
+                
+                return jsonify({
+                    "message": "BNB withdrawal sent successfully",
+                    "transaction_info": {
+                        "reference_id": reference_id,
+                        "amount_bnb": amount,
+                        "amount_wei": amount_smallest_unit,
+                        "to_address": to_address,
+                        "tx_hash": tx_hash,
+                        "gas_limit": gas_limit,
+                        "reservation_reference": reservation_reference
+                    }
+                }), 200
+            except Exception as e:
+                session.rollback()
+                app.logger.error(f"❌ BNB withdrawal failed: {e}")
+                return jsonify({"error": [{"withdrawal": f"Withdrawal failed: {str(e)}"}]}), 500
+            
+        except Exception as withdrawal_error:
+            session.rollback()
+            app.logger.error(f"❌ BNB withdrawal failed: {withdrawal_error}")
+            return jsonify({"error": [{"withdrawal": f"Withdrawal failed: {str(withdrawal_error)}"}]}), 500
+            
+        finally:
+            session.close()
+            
+    except Exception as e:
+        app.logger.error(f"❌ BNB withdrawal endpoint error: {e}")
+        return jsonify({"error": [{"system": str(e)}]}), 500
+
+@app.route("/wallet/withdraw/bnb/status/<reference_id>", methods=["GET"])
+@token_required
+def wallet_withdraw_bnb_status(reference_id):
+    """
+    Check the status of a BNB withdrawal transaction
+    """
+    try:
+        user_id = g.user.id
+        session = db.connection.session
+        
+        # Find the withdrawal transaction
+        transaction = session.query(Transaction).filter_by(
+            reference_id=reference_id,
+            type=TransactionType.WITHDRAWAL
+        ).join(Account).filter(Account.user_id == user_id, Account.currency == "BNB").first()
+        
+        if not transaction:
+            return jsonify({
+                "error": [{"transaction": "BNB withdrawal transaction not found"}]
+            }), 404
+        
+        if transaction.status != TransactionStatus.PENDING:
+            return jsonify({
+                "status": transaction.status.value,
+                "message": f"Transaction is {transaction.status.value}"
+            }), 200
+        
+        # Initialize BNB wallet to check status
+        from shared.crypto.clients.evm_base_client import create_bnb_client
+        
+        api_key = config('ALCHEMY_API_KEY', default='')
+        if not api_key:
+            return jsonify({"error": [{"system": "BNB API key not configured"}]}), 500
+        
+        bnb_wallet = create_bnb_client(user_id=user_id, session=session, network="mainnet", api_key=api_key)
+        
+        # Get transaction hash from metadata
+        tx_hash = transaction.metadata.get("tx_hash") if transaction.metadata else None
+        if not tx_hash:
+            return jsonify({
+                "error": [{"transaction": "Transaction hash not found"}]
+            }), 400
+        
+        # Check transaction status on blockchain
+        try:
+            tx_status = bnb_wallet.get_transaction_status(tx_hash)
+            
+            if tx_status.get("confirmed"):
+                # Update transaction status
+                transaction.status = TransactionStatus.COMPLETED
+                session.commit()
+                
+                return jsonify({
+                    "status": "completed",
+                    "message": "BNB withdrawal completed successfully",
+                    "tx_hash": tx_hash,
+                    "confirmations": tx_status.get("confirmations", 0)
+                }), 200
+            else:
+                return jsonify({
+                    "status": "pending",
+                    "message": "BNB withdrawal is still pending",
+                    "tx_hash": tx_hash,
+                    "confirmations": tx_status.get("confirmations", 0)
+                }), 200
+                
+        except Exception as status_error:
+            app.logger.error(f"❌ Error checking BNB transaction status: {status_error}")
+            return jsonify({
+                "status": "unknown",
+                "message": "Unable to check transaction status",
+                "tx_hash": tx_hash
+            }), 200
+            
+    except Exception as e:
+        app.logger.error(f"❌ BNB withdrawal status endpoint error: {e}")
+        return jsonify({"error": [{"system": str(e)}]}), 500
+    finally:
+        if 'session' in locals():
+            session.close()
 
 @app.route("/wallet/withdraw/tron", methods=["POST"])
 @token_required
@@ -5117,8 +5652,9 @@ def get_crypto_balances(current_user):
             
             balances[currency] = balance_entry
         
-        # Add any missing supported currencies with zero balance for UI consistency
-        supported_cryptos = ['BTC', 'ETH', 'SOL', 'BNB', 'USDT', 'USDC', 'TRX', 'LTC']
+        # Add any missing enabled currencies with zero balance for UI consistency
+        from shared.currency_utils import get_cached_enabled_currencies
+        supported_cryptos = get_cached_enabled_currencies()
         for crypto in supported_cryptos:
             if crypto not in balances:
                 balances[crypto] = {
@@ -5215,6 +5751,63 @@ def dashboard_summary():
         return jsonify({"error": "Failed to retrieve dashboard summary"}), 500
     finally:
         session.close()
+
+# Multi-network deposit endpoints
+@app.route('/deposit/networks/<token_symbol>', methods=['GET'])
+@token_required
+def get_deposit_networks(token_symbol):
+    """Get available networks for multi-network token deposits"""
+    try:
+        from multi_network_deposits import multi_network_deposit_manager
+        from flask import request
+        
+        # Check if testnets should be included (default: False for production)
+        include_testnets = request.args.get('include_testnets', 'false').lower() == 'true'
+        
+        result = multi_network_deposit_manager.get_deposit_networks(
+            token_symbol.upper(), 
+            include_testnets=include_testnets
+        )
+
+        app.logger.info(f"Deposit networks for {token_symbol}: {result}")
+        
+        if result["success"]:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        app.logger.error(f"Error getting deposit networks for {token_symbol}: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to get deposit networks"
+        }), 500
+
+@app.route('/api/v1/wallet/deposit/address/<token_symbol>/<network_type>', methods=['GET'])
+@token_required
+def get_network_deposit_address(token_symbol, network_type):
+    """Get deposit address for specific token and network"""
+    try:
+        current_user = g.user
+        from multi_network_deposits import get_multi_network_deposit_address
+        
+        result = get_multi_network_deposit_address(
+            current_user.id, 
+            token_symbol.upper(), 
+            network_type.lower()
+        )
+        
+        if result["success"]:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        app.logger.error(f"Error getting deposit address for {token_symbol} on {network_type}: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to generate deposit address"
+        }), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=3000, debug=True)

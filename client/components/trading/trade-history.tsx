@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { History, RefreshCw } from 'lucide-react';
+import { TrendingUp, TrendingDown, ArrowUpRight, ArrowDownLeft, RefreshCw, History, CheckCircle, Clock, XCircle, AlertCircle } from 'lucide-react';
 import { apiClient } from '@/lib/api-client';
 import { formatUGX, formatNumber } from '@/lib/currency-formatter';
 import { toast } from "react-hot-toast";
@@ -12,12 +12,18 @@ import { toast } from "react-hot-toast";
 interface Trade {
   id: string;
   type: 'buy' | 'sell';
+  trade_type: string;
   crypto_currency: string;
+  fiat_currency: string;
   crypto_amount: number;
   fiat_amount: number;
   total_amount: number;
+  exchange_rate: number;
+  fee_amount: number;
   status: string;
+  payment_method: string;
   created_at: string;
+  updated_at: string;
   completed_at?: string;
 }
 
@@ -38,13 +44,16 @@ export function TradeHistory({ limit = 10 }: TradeHistoryProps) {
     try {
       setIsLoading(true);
       const response = await apiClient.getTradeHistory(limit, 0);
-      // Map the response data to include total_amount if missing
+      // Map the response data to ensure all fields are present
       const mappedTrades = (response.trades || []).map((trade: any) => ({
         ...trade,
-        total_amount: trade.total_amount || trade.fiat_amount || 0
+        // Ensure total_amount is available, fallback to fiat_amount
+        total_amount: trade.total_amount || trade.fiat_amount || 0,
+        // Ensure type is lowercase for consistency
+        type: (trade.type || trade.trade_type || '').toLowerCase()
       }));
       setTrades(mappedTrades);
-      setTotal(response.total || 0);
+      setTotal(response.pagination?.total || response.total || mappedTrades.length);
     } catch (error: any) {
       console.error('Failed to load trade history:', error);
       toast.error('Failed to load trade history');
@@ -54,16 +63,17 @@ export function TradeHistory({ limit = 10 }: TradeHistoryProps) {
     }
   };
 
-  const getStatusColor = (status: string) => {
+  const getStatusIcon = (status: string) => {
     switch (status.toLowerCase()) {
       case 'completed':
-        return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300';
+        return <CheckCircle className="w-4 h-4 text-green-600 dark:text-green-400" />;
       case 'pending':
-        return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300';
+      case 'payment_pending':
+        return <Clock className="w-4 h-4 text-yellow-600 dark:text-yellow-400" />;
       case 'failed':
-        return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300';
+        return <XCircle className="w-4 h-4 text-red-600 dark:text-red-400" />;
       default:
-        return 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-300';
+        return <AlertCircle className="w-4 h-4 text-gray-600 dark:text-gray-400" />;
     }
   };
 
@@ -109,88 +119,92 @@ export function TradeHistory({ limit = 10 }: TradeHistoryProps) {
             <p className="text-xs mt-1">Start trading to see your history here</p>
           </div>
         ) : (
-          <div className="space-y-2 sm:space-y-3">
+          <div className="space-y-4">
             {trades.map((trade) => (
               <div
                 key={trade.id}
-                className="border rounded-lg p-3 sm:p-4"
+                className="border rounded-xl p-4 sm:p-6 hover:shadow-md transition-shadow bg-white dark:bg-gray-800"
               >
                 {/* Mobile Layout */}
                 <div className="sm:hidden">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <div className={`p-1.5 rounded-full ${
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-3 flex-1">
+                      <div className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${
                         trade.type === 'buy' 
-                          ? 'bg-green-100 dark:bg-green-900' 
-                          : 'bg-red-100 dark:bg-red-900'
+                          ? 'bg-green-50 dark:bg-green-900/20' 
+                          : 'bg-red-50 dark:bg-red-900/20'
                       }`}>
                         {trade.type === 'buy' ? (
-                          <History className="w-3 h-3 text-green-600 dark:text-green-400" />
+                          <ArrowUpRight className="w-4 h-4 text-green-600 dark:text-green-400" />
                         ) : (
-                          <RefreshCw className="w-3 h-3 text-red-600 dark:text-red-400" />
+                          <ArrowDownLeft className="w-4 h-4 text-red-600 dark:text-red-400" />
                         )}
                       </div>
-                      <span className="font-medium text-sm">
-                        {trade.type === 'buy' ? 'Buy' : 'Sell'} {trade.crypto_currency}
-                      </span>
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-xs truncate">
+                          {trade.type === 'buy' ? 'Bought' : 'Sold'} {formatNumber(trade.crypto_amount, trade.crypto_currency === 'BTC' ? 8 : 6)} {trade.crypto_currency}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {formatDate(trade.created_at)}
+                        </div>
+                      </div>
                     </div>
-                    <Badge className={`${getStatusColor(trade.status)} text-xs px-2 py-1`}>
-                      {trade.status}
-                    </Badge>
+                    <div className="flex items-center justify-center w-8 h-8 rounded-full bg-muted/30">
+                      {getStatusIcon(trade.status)}
+                    </div>
                   </div>
-                  <div className="flex justify-between items-end">
-                    <div>
-                      <div className="text-xs text-muted-foreground">
-                        {formatDate(trade.created_at)}
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-1">
-                        {formatNumber(trade.crypto_amount, 6)} {trade.crypto_currency}
-                      </div>
+                  
+                  <div className="flex justify-between items-baseline">
+                    <div className={`font-semibold text-xs ${
+                      trade.type === 'buy' ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'
+                    }`}>
+                      {trade.type === 'buy' ? '-' : '+'}{formatUGX(trade.total_amount)}
                     </div>
-                    <div className="text-right">
-                      <div className="font-semibold text-sm">
-                        {formatUGX(trade.total_amount)}
-                      </div>
+                    <div className="text-xs text-muted-foreground">
+                      Rate: {formatUGX(trade.exchange_rate)}/{trade.crypto_currency}
                     </div>
                   </div>
                 </div>
 
                 {/* Desktop Layout */}
-                <div className="hidden sm:flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className={`p-2 rounded-full ${
-                      trade.type === 'buy' 
-                        ? 'bg-green-100 dark:bg-green-900' 
-                        : 'bg-red-100 dark:bg-red-900'
-                    }`}>
-                      {trade.type === 'buy' ? (
-                        <History className="w-4 h-4 text-green-600 dark:text-green-400" />
-                      ) : (
-                        <RefreshCw className="w-4 h-4 text-red-600 dark:text-red-400" />
-                      )}
+                <div className="hidden sm:block">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-4 flex-1">
+                      <div className={`w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0 ${
+                        trade.type === 'buy' 
+                          ? 'bg-green-50 dark:bg-green-900/20' 
+                          : 'bg-red-50 dark:bg-red-900/20'
+                      }`}>
+                        {trade.type === 'buy' ? (
+                          <ArrowUpRight className="w-5 h-5 text-green-600 dark:text-green-400" />
+                        ) : (
+                          <ArrowDownLeft className="w-5 h-5 text-red-600 dark:text-red-400" />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-xs truncate">
+                          {trade.type === 'buy' ? 'Bought' : 'Sold'} {formatNumber(trade.crypto_amount, trade.crypto_currency === 'BTC' ? 8 : 6)} {trade.crypto_currency}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {formatDate(trade.created_at)}
+                        </div>
+                      </div>
                     </div>
-                    <div>
-                      <div className="font-medium">
-                        {trade.type === 'buy' ? 'Buy' : 'Sell'} {trade.crypto_currency}
-                      </div>
-                      <div className="text-sm text-muted-foreground">
-                        {formatDate(trade.created_at)}
-                      </div>
+                    <div className="flex items-center justify-center w-8 h-8 rounded-full bg-muted/30">
+                      {getStatusIcon(trade.status)}
                     </div>
                   </div>
                   
-                  <div className="text-right">
-                    <div className="font-medium">
-                      {formatUGX(trade.total_amount)}
+                  <div className="flex justify-between items-baseline">
+                    <div className={`font-semibold text-xs ${
+                      trade.type === 'buy' ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'
+                    }`}>
+                      {trade.type === 'buy' ? '-' : '+'}{formatUGX(trade.total_amount)}
                     </div>
-                    <div className="text-sm text-muted-foreground">
-                      {formatNumber(trade.crypto_amount, 8)} {trade.crypto_currency}
+                    <div className="text-xs text-muted-foreground">
+                      Rate: {formatUGX(trade.exchange_rate)}/{trade.crypto_currency}
                     </div>
                   </div>
-
-                  <Badge className={getStatusColor(trade.status)}>
-                    {trade.status}
-                  </Badge>
                 </div>
               </div>
             ))}

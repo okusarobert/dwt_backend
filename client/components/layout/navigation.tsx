@@ -23,6 +23,7 @@ import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { useAuth } from "@/components/auth/auth-provider";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
+import NotificationCenter from "@/components/notifications/notification-center";
 
 export function Navigation() {
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
@@ -145,6 +146,8 @@ export function Navigation() {
 
           {/* Right Side */}
           <div className="flex items-center space-x-2">
+            {/* Notifications */}
+            {isAuthenticated && <NotificationCenter />}
             {/* Theme toggle */}
             <ThemeToggle />
             {/* Hamburger (mobile) */}
@@ -201,7 +204,7 @@ export function Navigation() {
                           <Settings className="w-4 h-4 mr-3" />
                           Settings
                         </Link>
-                        {user?.role === "admin" && (
+                        {user?.role === "ADMIN" && (
                           <Link
                             href="/admin"
                             className="flex items-center px-3 py-1.5 text-sm rounded-md hover:bg-accent"
@@ -216,7 +219,7 @@ export function Navigation() {
                       <div className="p-1">
                         <button
                           onClick={handleLogout}
-                          className="flex items-center w-full px-3 py-1.5 text-sm rounded-md text-destructive-foreground hover:bg-destructive/10"
+                          className="flex items-center w-full px-3 py-1.5 text-sm rounded-md text-destructive hover:bg-destructive/20 hover:text-destructive font-medium"
                         >
                           <LogOut className="w-4 h-4 mr-3" />
                           Sign Out

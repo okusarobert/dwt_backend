@@ -25,7 +25,7 @@ import {
   Eye,
   RefreshCw
 } from 'lucide-react';
-import { formatCryptoAmount } from '@/lib/currency-formatter';
+import { formatCryptoAmount, formatNumber } from '@/lib/currency-formatter';
 import { useTransactionDetails } from '@/hooks/use-transactions';
 
 interface TransactionDetailsPageProps {}
@@ -236,7 +236,7 @@ const TransactionDetailsPage: React.FC<TransactionDetailsPageProps> = () => {
                   <div className={`mt-1 text-lg font-semibold ${
                     isDeposit ? 'text-green-500' : isWithdrawal ? 'text-red-500' : ''
                   }`}>
-                    {isDeposit ? '+' : isWithdrawal ? '-' : ''}{formatCryptoAmount(amount, currency)} {currency}
+                    {isDeposit ? '+' : isWithdrawal ? '-' : ''}{formatNumber(amount, currency === 'BTC' ? 8 : 6)} {currency}
                   </div>
                 </div>
                 <div>

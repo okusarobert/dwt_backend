@@ -2,8 +2,12 @@ import os
 from flask import Flask, request, jsonify
 from db.connection import session
 from db.models import User, Profile, UserRole
+from currency_routes import currency_bp
 
 app = Flask(__name__)
+
+# Register currency management blueprint
+app.register_blueprint(currency_bp, url_prefix='/admin')
 
 
 def serialize_user(u: User):
@@ -76,10 +80,13 @@ def admin_list_users():
         items = q.order_by(User.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
 
         return jsonify({
-            "items": [serialize_user(u) for u in items],
-            "total": total,
-            "page": page,
-            "page_size": page_size,
+            "success": True,
+            "data": [serialize_user(u) for u in items],
+            "pagination": {
+                "total": total,
+                "page": page,
+                "page_size": page_size
+            }
         })
     finally:
         session.close()

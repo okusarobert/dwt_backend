@@ -1,6 +1,9 @@
 import os
 import requests
 from typing import Optional, Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
 
 class RelworxApiClient:
     """
@@ -59,6 +62,10 @@ class RelworxApiClient:
             description: Description for the payment
             currency: Currency code (default UGX)
         """
+        # Ensure MSISDN starts with + for Relworx API
+        if not msisdn.startswith('+'):
+            msisdn = f"+{msisdn}"
+            
         url = f"{self.base_url}/mobile-money/request-payment"
         data = {
             "account_no": self.account_no,
@@ -68,10 +75,17 @@ class RelworxApiClient:
             "amount": amount,
             "description": description
         }
+        logger.info(f"[Wallet] Relworx request payment data: {data}")
         res = requests.post(url, headers=self.headers, json=data)
-        print(f"[Wallet] Relworx request payment response: {res.json()}")
-        res.raise_for_status()
-        return res.json()
+        try:
+            response_data = res.json()
+            logger.info(f"[Wallet] Relworx request payment response: {response_data}")
+            res.raise_for_status()
+            return response_data
+        except requests.exceptions.HTTPError:
+            logger.error(f"[Wallet] Relworx request payment failed with status {res.status_code}")
+            logger.error(f"[Wallet] Response body: {res.text}")
+            raise
 
     def send_payment(self, reference: str, msisdn: str, amount: float, description: str = "Withdrawal from TOI BETS", currency: str = "UGX") -> Dict[str, Any]:
         """
@@ -83,6 +97,10 @@ class RelworxApiClient:
             description: Description for the payment (default: 'Withdrawal from TOI BETS')
             currency: Currency code (default UGX)
         """
+        # Ensure MSISDN starts with + for Relworx API
+        if not msisdn.startswith('+'):
+            msisdn = f"+{msisdn}"
+            
         url = f"{self.base_url}/mobile-money/send-payment"
         data = {
             "account_no": self.account_no,
@@ -93,5 +111,12 @@ class RelworxApiClient:
             "description": description
         }
         res = requests.post(url, headers=self.headers, json=data)
-        res.raise_for_status()
-        return res.json() 
+        try:
+            response_data = res.json()
+            logger.info(f"[Wallet] Relworx send payment response: {response_data}")
+            res.raise_for_status()
+            return response_data
+        except requests.exceptions.HTTPError:
+            logger.error(f"[Wallet] Relworx send payment failed with status {res.status_code}")
+            logger.error(f"[Wallet] Response body: {res.text}")
+            raise 

@@ -28,7 +28,7 @@ gunicorn==22.0.0
 asyncpg
 flasgger
 phonenumbers==9.0.9
-hdwallet==2.2.1
+hdwallet==3.6.1
 ecdsa
 eth-utils==5.0.0
 bitcart==1.18.0.0

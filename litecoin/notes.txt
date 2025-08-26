@@ -1,0 +1,309 @@
+## Litecoin Testnet Node Setup Guide
+
+### 1. Install Litecoin Core
+
+```bash
+# Create litecoin user
+sudo adduser litecoin
+sudo usermod -aG sudo litecoin
+
+# Switch to litecoin user
+sudo su - litecoin
+
+# Download Litecoin Core (latest version)
+cd /tmp
+wget https://download.litecoin.org/litecoin-0.21.3/linux/litecoin-0.21.3-x86_64-linux-gnu.tar.gz
+
+# Verify download (optional but recommended)
+wget https://download.litecoin.org/litecoin-0.21.3/linux/litecoin-0.21.3-linux-signatures.asc
+# gpg --verify litecoin-0.21.3-linux-signatures.asc
+
+# Extract and install
+tar -xzf litecoin-0.21.3-x86_64-linux-gnu.tar.gz
+sudo cp litecoin-0.21.3/bin/* /usr/local/bin/
+
+# Verify installation
+litecoind --version
+```
+
+### 2. Create Litecoin Directory and Configuration
+
+```bash
+# Create litecoin directory
+mkdir ~/.litecoin
+
+# Create litecoin.conf
+nano ~/.litecoin/litecoin.conf
+```
+
+**Optimized `litecoin.conf` for pruned testnet:**
+
+```ini
+# Network
+testnet=1
+listen=1
+maxconnections=20
+
+# Pruning (keeps only ~5GB of blocks)
+prune=5000
+# Disable block filter index and peer block filters (incompatible with pruning)
+blockfilterindex=0
+peerblockfilters=0
+
+# RPC Configuration (global settings)
+server=1
+rpcuser=tondeka
+rpcpassword=your_secure_ltc_password_here
+
+# Allow specific IP ranges (replace with your backend server IPs)
+rpcallowip=127.0.0.1
+rpcallowip=0.0.0.0/0
+
+# Performance optimizations
+dbcache=1000
+maxmempool=200
+mempoolexpiry=72
+
+# Logging
+debug=0
+shrinkdebugfile=1
+
+# Wallet
+disablewallet=0
+
+# Testnet-specific settings
+[test]
+rpcbind=0.0.0.0
+rpcport=19332
+zmqpubrawblock=tcp://0.0.0.0:29332
+zmqpubrawtx=tcp://0.0.0.0:29333
+zmqpubhashtx=tcp://0.0.0.0:29334
+zmqpubhashblock=tcp://0.0.0.0:29335
+```
+
+### 3. Create Systemd Service
+
+```bash
+sudo nano /etc/systemd/system/litecoind.service
+```
+
+```ini
+[Unit]
+Description=Litecoin daemon
+After=network.target
+
+[Service]
+Type=forking
+User=litecoin
+Group=litecoin
+WorkingDirectory=/home/litecoin
+ExecStart=/usr/local/bin/litecoind -daemon -conf=/home/litecoin/.litecoin/litecoin.conf -datadir=/home/litecoin/.litecoin
+ExecStop=/usr/local/bin/litecoin-cli -conf=/home/litecoin/.litecoin/litecoin.conf stop
+Restart=always
+RestartSec=5
+TimeoutStopSec=60
+KillMode=process
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 4. Start and Enable Service
+
+```bash
+# Reload systemd
+sudo systemctl daemon-reload
+
+# Enable service
+sudo systemctl enable litecoind
+
+# Start service
+sudo systemctl start litecoind
+
+# Check status
+sudo systemctl status litecoind
+
+# Follow logs
+sudo journalctl -u litecoind -f
+```
+
+### 5. Basic Commands
+
+```bash
+# Check if node is running
+litecoin-cli -testnet getblockchaininfo
+
+# Check connections
+litecoin-cli -testnet getnetworkinfo
+
+# Check sync progress
+litecoin-cli -testnet getblockcount
+
+# Get new address
+litecoin-cli -testnet getnewaddress
+
+# Get balance
+litecoin-cli -testnet getbalance
+```
+
+### 6. Security Configuration for Internet RPC Access
+
+```bash
+# Configure firewall for internet RPC access
+sudo ufw allow ssh
+sudo ufw allow 19335/tcp  # Litecoin testnet P2P
+sudo ufw allow 19332/tcp  # Litecoin testnet RPC
+sudo ufw allow 29332:29335/tcp  # ZMQ ports
+sudo ufw --force enable
+
+# Generate secure RPC credentials
+python3 -c "
+import secrets
+import hashlib
+import hmac
+
+username = 'tondeka'
+password = secrets.token_urlsafe(32)
+salt = secrets.token_hex(16)
+h = hmac.new(bytearray(salt, 'utf-8'), bytearray(password, 'utf-8'), hashlib.sha256).hexdigest()
+print(f'Generated LTC RPC credentials:')
+print(f'Username: {username}')
+print(f'Password: {password}')
+print(f'rpcauth line: rpcauth={username}:{salt}\${h}')
+print(f'\\nAdd this to your .env file:')
+print(f'LTC_TESTNET_RPC_USER={username}')
+print(f'LTC_TESTNET_RPC_PASSWORD={password}')
+"
+
+# Set up SSL/TLS (optional but recommended)
+# Generate self-signed certificate for RPC
+sudo openssl req -x509 -newkey rsa:4096 -keyout /home/litecoin/.litecoin/server.key -out /home/litecoin/.litecoin/server.crt -days 365 -nodes -subj "/CN=litecoin-rpc"
+sudo chown litecoin:litecoin /home/litecoin/.litecoin/server.*
+sudo chmod 600 /home/litecoin/.litecoin/server.key
+```
+
+### 7. Integration with Your DWT Backend
+
+**Environment variables for your backend:**
+
+```bash
+# Add to your .env file
+LTC_TESTNET_RPC_HOST=143.198.107.58
+LTC_TESTNET_RPC_PORT=18333
+LTC_TESTNET_RPC_USER=tondeka
+LTC_TESTNET_RPC_PASSWORD=8C-5iPO28wP80Y4Y4MHK9MJkw4H5T8X3pPBYMjCmMVU
+LTC_TESTNET_NETWORK=testnet
+```
+
+### 8. Test RPC Connection
+
+```bash
+# Test from your backend server
+curl -u tondeka:your_password -d '{"jsonrpc":"1.0","id":"test","method":"getblockchaininfo","params":[]}' -H 'content-type: text/plain;' http://YOUR_VPS_IP:19332/
+```
+
+### 9. Litecoin Testnet Specifics
+
+**Key Differences from Bitcoin:**
+- **P2P Port**: 19335 (testnet)
+- **RPC Port**: 19332 (testnet)
+- **ZMQ Ports**: 29332-29335
+- **Block Time**: ~2.5 minutes (vs Bitcoin's 10 minutes)
+- **Total Supply**: 84 million LTC (vs Bitcoin's 21 million)
+- **Algorithm**: Scrypt (vs Bitcoin's SHA-256)
+
+**Testnet Faucets:**
+- https://testnet.help/en/ltcfaucet/testnet
+- https://kuttler.eu/en/bitcoin/ltc/faucet/
+
+### 10. Monitoring and Maintenance
+
+```bash
+# Check sync status
+litecoin-cli -testnet getblockchaininfo | grep -E "(blocks|headers|verificationprogress)"
+
+# Monitor disk usage
+du -sh ~/.litecoin/testnet4/
+
+# Check connections
+litecoin-cli -testnet getpeerinfo | wc -l
+
+# Restart service if needed
+sudo systemctl restart litecoind
+```
+
+### 11. Troubleshooting
+
+**If daemon fails to start (no debug.log created):**
+
+```bash
+# Check if litecoind is properly installed
+which litecoind
+litecoind --version
+
+# Check permissions on .litecoin directory
+ls -la ~/.litecoin/
+sudo chown -R litecoin:litecoin ~/.litecoin/
+
+# Try running manually to see error
+litecoind -testnet -daemon
+
+# Check if ports are available
+sudo netstat -tlnp | grep -E "(19332|19335)"
+
+# Verify configuration file syntax
+cat ~/.litecoin/litecoin.conf
+
+# Check system resources
+free -h
+df -h
+```
+
+**Common Issues:**
+1. **Installation**: Litecoin Core not properly installed or in PATH
+2. **Configuration**: Invalid syntax in litecoin.conf
+3. **Permissions**: litecoin user doesn't own ~/.litecoin directory
+4. **Port conflicts**: Ports 19332, 19335, 29332-29335 already in use
+5. **Memory**: Insufficient RAM for dbcache setting
+6. **Dependencies**: Missing system libraries
+
+**Debug logs location:**
+```bash
+# Main debug log
+tail -f ~/.litecoin/debug.log
+
+# Testnet debug log (created after successful start)
+tail -f ~/.litecoin/testnet4/debug.log
+```
+
+**Quick fix for common startup failures:**
+```bash
+# Ensure proper ownership
+sudo chown -R litecoin:litecoin /home/litecoin/.litecoin/
+
+# Create minimal config for testing
+cat > ~/.litecoin/litecoin.conf << EOF
+testnet=1
+server=1
+rpcuser=tondeka
+rpcpassword=test123
+rpcallowip=127.0.0.1
+EOF
+
+# Try starting manually
+litecoind -testnet
+```
+
+### 12. Reserve Address Generation
+
+Litecoin uses the same HD wallet structure as Bitcoin, so your existing reserve address generation should work with LTC testnet addresses starting with 'm', 'n', or 'tb1'.
+
+**Example reserve addresses:**
+- Legacy: mxzchUqc3XVFTnrkgwZohHG6V757Sc2jXB
+- Bech32: tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx

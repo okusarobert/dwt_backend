@@ -665,6 +665,25 @@ class TronMonitor:
             )
             session.add(release_res)
             session.commit()
+            
+            # Trigger immediate sweep after deposit confirmation
+            if t.type == TransactionType.DEPOSIT:
+                try:
+                    sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'wallet'))
+                    from crypto_sweeper_service import CryptoSweeperService
+                    sweeper = CryptoSweeperService()
+                    sweep_success = sweeper.sweep_address_on_deposit(
+                        address=t.address,
+                        currency='TRX',
+                        transaction_hash=t.blockchain_txid
+                    )
+                    if sweep_success:
+                        logger.info(f"🧹 Successfully triggered sweep for TRX deposit {t.blockchain_txid}")
+                    else:
+                        logger.warning(f"🧹 Sweep not triggered for TRX deposit {t.blockchain_txid}")
+                except Exception as sweep_error:
+                    logger.error(f"❌ Error triggering sweep for TRX deposit {t.blockchain_txid}: {sweep_error}")
+            
             logger.info("✅ TRX tx confirmed %s; type=%s", t.blockchain_txid, t.type)
         except Exception as e:
             session.rollback()

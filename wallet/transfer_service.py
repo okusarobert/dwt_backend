@@ -188,9 +188,9 @@ class TransferService:
         return available_balance >= amount
     
     def _is_crypto_currency(self, currency: str) -> bool:
-        """Check if currency is crypto"""
-        crypto_currencies = ['BTC', 'ETH', 'SOL', 'BNB', 'AVAX', 'USDT', 'USDC', 'TRX', 'LTC', 'WLD', 'POL', 'OP']
-        return currency.upper() in crypto_currencies
+        """Check if currency is crypto using admin panel"""
+        from shared.currency_utils import is_currency_enabled
+        return is_currency_enabled(currency.upper())
     
     def _get_account_type(self, currency: str) -> str:
         """Get account type based on currency"""

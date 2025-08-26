@@ -40,4 +40,9 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
-node_modules
+
+# Node.js and Next.js files
+node_modules/
+client/.next/
+client/node_modules/
+.next/

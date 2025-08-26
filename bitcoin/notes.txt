@@ -1,0 +1,281 @@
+# Bitcoin Testnet Node Setup Instructions
+
+## VPS Requirements
+
+**Minimum Specs:**
+- **CPU**: 2+ cores
+- **RAM**: 4GB+ (8GB recommended)
+- **Storage**: 50GB+ SSD (pruned testnet ~10-20GB)
+- **Network**: Unlimited bandwidth
+- **OS**: Ubuntu 22.04 LTS
+
+## Step-by-Step Setup
+
+### 1. Initial Server Setup
+
+```bash
+# Update system
+sudo apt update && sudo apt upgrade -y
+
+# Install dependencies
+sudo apt install -y curl wget gnupg software-properties-common
+
+# Create bitcoin user
+sudo adduser bitcoin
+sudo usermod -aG sudo bitcoin
+```
+
+### 2. Install Bitcoin Core
+
+```bash
+# Switch to bitcoin user
+sudo su - bitcoin
+
+# Download Bitcoin Core (latest version)
+cd ~
+wget https://bitcoincore.org/bin/bitcoin-core-25.1/bitcoin-25.1-x86_64-linux-gnu.tar.gz
+
+# Verify signatures (recommended)
+wget https://bitcoincore.org/bin/bitcoin-core-25.1/SHA256SUMS
+wget https://bitcoincore.org/bin/bitcoin-core-25.1/SHA256SUMS.asc
+
+# Extract
+tar -xzf bitcoin-25.1-x86_64-linux-gnu.tar.gz
+sudo install -m 0755 -o root -g root -t /usr/local/bin bitcoin-25.1/bin/*
+```
+
+### 3. Configure Bitcoin Node
+
+```bash
+# Create bitcoin directory
+mkdir ~/.bitcoin
+
+# Create bitcoin.conf
+nano ~/.bitcoin/bitcoin.conf
+```
+
+**Optimized `bitcoin.conf` for pruned testnet:**
+
+```ini
+# Network
+testnet=1
+listen=1
+maxconnections=20
+
+# Pruning (keeps only ~10GB of blocks)
+prune=10000
+
+# RPC Configuration (global settings)
+server=1
+# Use either rpcuser/rpcpassword OR rpcauth (not both)
+# Option 1: Simple username/password (less secure)
+rpcuser=tondeka
+rpcpassword=your_secure_rpc_password_here
+
+# Option 2: Secure rpcauth (recommended - comment out rpcuser/rpcpassword above)
+# rpcauth=tondeka:SALT$HASH_GENERATED_BY_SCRIPT
+
+# Allow specific IP ranges (replace with your backend server IPs)
+rpcallowip=127.0.0.1
+rpcallowip=0.0.0.0/0
+
+# Performance optimizations
+dbcache=2000
+maxmempool=300
+mempoolexpiry=72
+
+# Logging
+debug=0
+shrinkdebugfile=1
+
+# Wallet (if you need wallet functionality)
+disablewallet=0
+
+# Testnet-specific settings
+[test]
+rpcbind=0.0.0.0
+rpcport=18332
+zmqpubrawblock=tcp://0.0.0.0:28332
+zmqpubrawtx=tcp://0.0.0.0:28333
+zmqpubhashtx=tcp://0.0.0.0:28334
+zmqpubhashblock=tcp://0.0.0.0:28335
+```
+
+### 4. Create Systemd Service
+
+```bash
+sudo nano /etc/systemd/system/bitcoind.service
+```
+
+```ini
+[Unit]
+Description=Bitcoin daemon
+Documentation=https://github.com/bitcoin/bitcoin/blob/master/doc/init.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/bitcoind -daemon -conf=/home/bitcoin/.bitcoin/bitcoin.conf -datadir=/home/bitcoin/.bitcoin
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Type=forking
+PIDFile=/home/bitcoin/.bitcoin/testnet3/bitcoind.pid
+Restart=on-failure
+RestartSec=5
+User=bitcoin
+Group=bitcoin
+
+# Process management
+LimitNOFILE=128000
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 5. Start and Enable Service
+
+```bash
+# Reload systemd
+sudo systemctl daemon-reload
+
+# Enable and start bitcoind
+sudo systemctl enable bitcoind
+sudo systemctl start bitcoind
+
+# Check status
+sudo systemctl status bitcoind
+
+# Monitor logs
+sudo journalctl -u bitcoind -f
+```
+
+### 6. Verify Node Operation
+
+```bash
+# Check if node is running
+bitcoin-cli -testnet getblockchaininfo
+
+# Check connections
+bitcoin-cli -testnet getnetworkinfo
+
+# Check sync progress
+bitcoin-cli -testnet getblockcount
+```
+
+### 7. Security Configuration for Internet RPC Access
+
+```bash
+# Configure firewall for internet RPC access
+sudo ufw allow ssh
+sudo ufw allow 18333/tcp  # Bitcoin testnet P2P
+sudo ufw allow 18332/tcp  # Bitcoin testnet RPC
+sudo ufw allow 28332:28335/tcp  # ZMQ ports
+sudo ufw --force enable
+
+# Generate secure RPC credentials
+python3 -c "
+import secrets
+import hashlib
+import hmac
+
+username = 'tondeka'
+password = secrets.token_urlsafe(32)
+salt = secrets.token_hex(16)
+h = hmac.new(bytearray(salt, 'utf-8'), bytearray(password, 'utf-8'), hashlib.sha256).hexdigest()
+print(f'Generated RPC credentials:')
+print(f'Username: {username}')
+print(f'Password: {password}')
+print(f'rpcauth line: rpcauth={username}:{salt}${h}')
+print(f'\\nAdd this to your .env file:')
+print(f'BTC_TESTNET_RPC_USER={username}')
+print(f'BTC_TESTNET_RPC_PASSWORD={password}')
+"
+
+# Set up SSL/TLS (optional but recommended)
+# Generate self-signed certificate for RPC
+sudo openssl req -x509 -newkey rsa:4096 -keyout /home/bitcoin/.bitcoin/server.key -out /home/bitcoin/.bitcoin/server.crt -days 365 -nodes -subj "/CN=bitcoin-rpc"
+sudo chown bitcoin:bitcoin /home/bitcoin/.bitcoin/server.*
+sudo chmod 600 /home/bitcoin/.bitcoin/server.key
+```
+
+### 8. Integration with Your DWT Backend
+
+**Environment variables for your backend:**
+
+```bash
+# Add to your .env file
+BTC_TESTNET_RPC_HOST=your_vps_ip
+BTC_TESTNET_RPC_PORT=18332
+BTC_TESTNET_RPC_USER=your_rpc_user
+BTC_TESTNET_RPC_PASSWORD=your_secure_rpc_password
+BTC_TESTNET_ZMQ_BLOCK=tcp://your_vps_ip:28332
+BTC_TESTNET_ZMQ_TX=tcp://your_vps_ip:28333
+```
+
+### 9. Monitoring and Maintenance
+
+```bash
+# Check disk usage
+df -h ~/.bitcoin
+
+# Monitor sync progress
+watch bitcoin-cli -testnet getblockchaininfo
+
+# Backup wallet (if using wallet features)
+bitcoin-cli -testnet backupwallet /home/bitcoin/wallet_backup.dat
+```
+
+## Expected Timeline
+
+- **Initial sync**: 2-4 hours (testnet is much smaller than mainnet)
+- **Ongoing storage**: ~10-20GB with pruning
+- **Memory usage**: ~1-2GB RAM
+- **Network**: Moderate bandwidth usage
+
+## Next Steps for Integration
+
+Once your node is running, you can:
+
+1. **Update BTC sweep implementation** to use your node's RPC
+2. **Implement webhook notifications** using ZMQ feeds
+3. **Test BTC address monitoring** and transaction broadcasting
+4. **Complete the BTC sweep functionality** in your crypto sweeper service
+
+The pruned testnet node will give you full Bitcoin functionality while keeping storage requirements minimal and using testnet coins for safe testing.
+
+## Useful Commands
+
+```bash
+# Check node status
+bitcoin-cli -testnet getblockchaininfo
+
+# Get new address
+bitcoin-cli -testnet getnewaddress
+
+# Send transaction
+bitcoin-cli -testnet sendtoaddress "address" amount
+
+# Get transaction details
+bitcoin-cli -testnet gettransaction "txid"
+
+# List unspent outputs
+bitcoin-cli -testnet listunspent
+
+# Get balance
+bitcoin-cli -testnet getbalance
+
+# Generate blocks (testnet only)
+bitcoin-cli -testnet generatetoaddress 1 "address"
+```
+
+## Troubleshooting
+
+**Common Issues:**
+
+1. **Sync stuck**: Check connections with `getnetworkinfo`
+2. **RPC not responding**: Verify bitcoin.conf settings
+3. **Disk space**: Monitor with `df -h` and adjust prune setting
+4. **Memory issues**: Reduce `dbcache` in bitcoin.conf
+5. **Network issues**: Check firewall and port availability

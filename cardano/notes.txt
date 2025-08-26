@@ -1,0 +1,239 @@
+Cardano Integration Notes
+========================
+
+Cardano (ADA) integration for DWT backend - research and implementation guide.
+
+## Cardano Overview
+
+**Key Differences from Other Blockchains:**
+- **Proof of Stake**: Uses Ouroboros consensus (no mining)
+- **UTXO Model**: Extended UTXO (eUTXO) with smart contract support
+- **Native Tokens**: Built-in multi-asset support without smart contracts
+- **Epochs**: 5-day periods for staking rewards and protocol updates
+- **Plutus**: Functional programming language for smart contracts
+- **Hydra**: Layer 2 scaling solution
+
+**Technical Specifications:**
+- **Block Time**: ~20 seconds average
+- **Transaction Fees**: 0.15-0.5 ADA typical
+- **Minimum UTXO**: ~1 ADA per UTXO (varies with native tokens)
+- **Address Format**: Bech32 (addr1...) for mainnet, addr_test1... for testnet
+
+## Integration Options
+
+### Option 1: Cardano Node + cardano-cli (Self-Hosted)
+**Pros:**
+- Full control and no rate limits
+- Direct blockchain access
+- Can run stake pool (optional)
+- Most reliable for high-volume operations
+
+**Cons:**
+- Complex setup (3 components: node, wallet, cli)
+- Large storage requirements (~100GB+ and growing)
+- Long sync time (6-24 hours)
+- Ongoing maintenance overhead
+- Memory intensive (8GB+ RAM recommended)
+
+**Components Required:**
+- **cardano-node**: Core blockchain node
+- **cardano-wallet**: REST API for wallet operations  
+- **cardano-cli**: Command-line interface
+- **cardano-db-sync**: Database sync (optional, for advanced queries)
+
+### Option 2: Blockfrost API (Recommended)
+**Pros:**
+- No node setup required
+- Fast implementation
+- Well-documented REST API
+- Free tier available (50k requests/day)
+- Reliable infrastructure
+
+**Cons:**
+- Dependent on third-party service
+- Rate limiting on free tier
+- API costs for high volume
+
+**API Endpoints:**
+- **Mainnet**: https://cardano-mainnet.blockfrost.io/api/v0
+- **Testnet**: https://cardano-testnet.blockfrost.io/api/v0
+
+### Option 3: Koios API (Community)
+**Pros:**
+- Free community-run API
+- No API keys required
+- Multiple endpoints available
+
+**Cons:**
+- Less reliable than commercial services
+- No SLA guarantees
+- Potential rate limiting
+
+## Recommended Approach: Blockfrost API
+
+For DWT backend, Blockfrost API offers the best balance of reliability, ease of implementation, and cost-effectiveness.
+
+## Cardano Testnet Integration
+
+**Testnet Details:**
+- **Network**: Cardano Testnet (Preview/Preprod)
+- **API**: https://cardano-testnet.blockfrost.io/api/v0
+- **Explorer**: https://preview.cardanoscan.io
+- **Faucet**: https://docs.cardano.org/cardano-testnet/tools/faucet
+
+**Required API Key:**
+- Sign up at https://blockfrost.io
+- Get free API key (50k requests/day)
+- Upgrade to paid plan for production
+
+## Address Generation
+
+**Cardano Address Types:**
+- **Base Address**: Standard payment address (most common)
+- **Enterprise Address**: Payment only (no staking)
+- **Pointer Address**: References stake registration
+- **Reward Address**: For staking rewards
+
+**HD Wallet Support:**
+- Uses BIP32/BIP44 derivation
+- Derivation path: m/1852'/1815'/0'/0/0 (mainnet)
+- Derivation path: m/1852'/1815'/0'/0/0 (testnet same)
+- Supports mnemonic seed phrases (12/15/24 words)
+
+## Transaction Structure
+
+**Cardano Transactions:**
+- **Inputs**: UTXOs being spent
+- **Outputs**: New UTXOs being created
+- **Fees**: Calculated based on tx size and script execution
+- **Metadata**: Optional arbitrary data (up to 16KB)
+- **Certificates**: For staking operations
+- **Withdrawals**: For claiming staking rewards
+
+**Fee Calculation:**
+```
+fee = a + b * tx_size + c * script_steps
+where:
+a = 155381 lovelace (base fee)
+b = 44 lovelace per byte
+c = script execution costs
+```
+
+## Python Libraries
+
+**Recommended Libraries:**
+```bash
+pip install pycardano blockfrost-python requests
+```
+
+**Alternative Libraries:**
+- **cardano-python**: Lower-level Cardano operations
+- **PyCardano**: High-level transaction building
+- **blockfrost-python**: Official Blockfrost SDK
+
+## Security Considerations
+
+**Key Management:**
+- Uses Ed25519 cryptography
+- Extended private keys for HD wallets
+- Separate spending and staking keys
+- Hardware wallet support (Ledger, Trezor)
+
+**Best Practices:**
+- Never expose private keys
+- Use separate keys for different purposes
+- Implement proper key rotation
+- Monitor for unusual staking activity
+
+## Testing Strategy
+
+**Testnet Workflow:**
+1. Generate testnet addresses
+2. Fund addresses using testnet faucet
+3. Test ADA transactions
+4. Test native token operations (if needed)
+5. Implement transaction monitoring
+6. Test sweep functionality
+
+## Production Considerations
+
+**Mainnet Migration:**
+- **Mainnet API**: https://cardano-mainnet.blockfrost.io/api/v0
+- **Real ADA Required**: Minimum ~1 ADA per UTXO
+- **Transaction Fees**: Real ADA costs (0.15-0.5 ADA typical)
+- **API Costs**: Blockfrost paid plans for production volume
+
+## Storage Requirements Comparison
+
+| Component | Storage | RAM | Sync Time |
+|-----------|---------|-----|-----------|
+| **Cardano Node** | 100GB+ | 8GB+ | 6-24 hours |
+| **Bitcoin Node** | 500GB+ | 4GB+ | 1-7 days |
+| **Litecoin Node** | 50GB+ | 2GB+ | 2-12 hours |
+| **XRP Node** | 25GB+ | 4GB+ | 2-6 hours |
+
+## Integration Architecture
+
+**Components Needed:**
+1. **Cardano Client**: Blockfrost API wrapper
+2. **Address Generator**: HD wallet support for Cardano addresses  
+3. **Transaction Builder**: UTXO management and fee calculation
+4. **Transaction Monitor**: Webhook or polling-based tracking
+5. **Sweep Service**: UTXO consolidation for gas optimization
+
+## Development Phases
+
+**Phase 1: Basic Integration**
+- Blockfrost API client setup
+- Address generation and validation
+- Basic ADA payment functionality
+- Testnet integration
+
+**Phase 2: Advanced Features**
+- Transaction monitoring system
+- UTXO management and optimization
+- Sweep functionality integration
+- Fee estimation and optimization
+
+**Phase 3: Production Ready**
+- Mainnet support with paid Blockfrost plan
+- Enhanced error handling and retry logic
+- Performance optimization
+- Comprehensive testing and monitoring
+
+## Cost Analysis
+
+**Development Costs:**
+- **API Integration**: Low (Blockfrost free tier)
+- **Maintenance**: Low (no node management)
+- **Testing**: Free (testnet)
+
+**Operational Costs:**
+- **Blockfrost API**: Free (50k req/day) → $10-100/month (paid plans)
+- **Transaction Fees**: 0.15-0.5 ADA per transaction
+- **UTXO Management**: ~1 ADA minimum per UTXO
+
+## Next Steps
+
+1. **Research Complete**: ✅
+2. **Create Blockfrost account and get API key**
+3. **Set up Cardano client with testnet support**
+4. **Implement address generation using HD wallets**
+5. **Add transaction building and broadcasting**
+6. **Integrate with existing sweep and reserve systems**
+7. **Optional: Consider self-hosted node for production scale**
+
+## Comparison with Current Crypto Support
+
+| Feature | Bitcoin/Litecoin | XRP | Cardano |
+|---------|------------------|-----|---------|
+| **Node Setup** | Required | Optional | Optional (API) |
+| **Sync Time** | Hours/Days | Hours | Instant (API) |
+| **Transaction Speed** | 10min/2.5min | 3-5 sec | ~20 sec |
+| **Fees** | Variable | Fixed | Predictable |
+| **Account Model** | UTXO | Account | eUTXO |
+| **Minimum Balance** | None | 10 XRP | ~1 ADA per UTXO |
+| **Smart Contracts** | Limited | No | Yes (Plutus) |
+| **Native Tokens** | No | No | Yes |
+
+**Recommendation**: Start with Blockfrost API for faster development, similar to the XRP approach but with even better API support and documentation.
